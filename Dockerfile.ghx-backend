@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1.6
+
+FROM python:3.10-slim AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PORT=5000 \
+    GHX_ASSET_DIR=/app/assets \
+    GPU_BENCHMARK_FILE=/app/config/gpu-benchmarks.json
+
+WORKDIR /app
+
+RUN sed -i 's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
+&& sed -i 's|http://snapshot.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    openssh-client \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt baremetal_server.py ./ 
+COPY nvbandwidth p2pBandwidthLatencyTest nccl.tgz nccl-tests.tgz ib_health_check.sh assets/
+COPY config/gpu-benchmarks.json config/
+
+RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+EXPOSE ${PORT}
+
+CMD ["python", "baremetal_server.py"]
+

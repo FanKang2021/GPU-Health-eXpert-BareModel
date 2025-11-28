@@ -1,0 +1,35 @@
+version: "3.9"
+
+services:
+  backend:
+    image: ghx-baremetal-backend
+    container_name: ghx-backend
+    environment:
+      - PORT=5000
+      - GHX_ASSET_DIR=/app/assets
+      - GPU_BENCHMARK_FILE=/app/config/gpu-benchmarks.json
+    volumes:
+      # 挂载资产文件（可选，如果镜像中已包含则无需挂载）
+      - ./nvbandwidth:/app/nvbandwidth:ro
+      - ./p2pBandwidthLatencyTest:/app/p2pBandwidthLatencyTest:ro
+      - ./nccl.tgz:/app/nccl.tgz:ro
+      - ./nccl-tests.tgz:/app/nccl-tests.tgz:ro
+      # 挂载GPU基准值配置文件（支持热更新）
+      - ./config/gpu-benchmarks.json:/app/config/gpu-benchmarks.json:ro
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
+
+  frontend:
+    image: ghx-frontend
+    container_name: ghx-frontend
+    environment:
+      # 通过反向代理 (HAProxy/Nginx) 访问时，将前端的 API 请求统一指向 /api
+      # 示例：HAProxy 将 https://domain/api -> http://backend:5000
+      - NEXT_PUBLIC_GHX_API=/api
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
