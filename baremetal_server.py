@@ -370,7 +370,7 @@ def parse_nccl(output: str) -> float:
 
 
 class RemoteNodeRunner:
-    def __init__(self, node_meta: Dict[str, Any], tests: List[str], dcgm_level: int, connection: Dict[str, Any]):
+    def __init__(self, node_meta: Dict[str, Any], tests: List[str], dcgm_level: int, connection: Dict[str, Any], cancelled_flag: Optional[threading.Event] = None):
         self.node_meta = node_meta
         self.tests = tests
         self.dcgm_level = dcgm_level
@@ -378,6 +378,7 @@ class RemoteNodeRunner:
         self.remote_dir = f"/tmp/ghx/{node_meta['nodeId']}"
         self.logs: List[str] = []
         self.session: Optional[SSHSession] = None
+        self.cancelled = cancelled_flag or threading.Event()
 
     def log(self, message: str):
         timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -393,40 +394,117 @@ class RemoteNodeRunner:
 
     def execute(self) -> Dict[str, Any]:
         results: Dict[str, Any] = {}
+        if self.cancelled.is_set():
+            self.log("任务已被取消，停止执行")
+            return {
+                "results": {},
+                "overallStatus": "cancelled",
+                "executionLog": "\n".join(self.logs),
+                "gpuType": self.node_meta.get("gpuType", "Unknown"),
+            }
+        
         with SSHSession(self.connection) as session:
             self.session = session
             self.log("SSH连接已建立")
+            
+            if self.cancelled.is_set():
+                self.log("任务已被取消，停止执行")
+                return {
+                    "results": {},
+                    "overallStatus": "cancelled",
+                    "executionLog": "\n".join(self.logs),
+                    "gpuType": self.node_meta.get("gpuType", "Unknown"),
+                }
+            
             session.run(f"mkdir -p {self.remote_dir}")
 
             gpu_info = self._query_gpu_info()
             self.node_meta["gpuType"] = gpu_info["model"]
             self.node_meta["gpuList"] = gpu_info["list"]
 
+            if self.cancelled.is_set():
+                self.log("任务已被取消，停止执行")
+                return {
+                    "results": {},
+                    "overallStatus": "cancelled",
+                    "executionLog": "\n".join(self.logs),
+                    "gpuType": self.node_meta.get("gpuType", "Unknown"),
+                }
+
             if "nvbandwidth" in self.tests:
+                if self.cancelled.is_set():
+                    self.log("任务已被取消，停止执行nvbandwidth测试")
+                    return {
+                        "results": results,
+                        "overallStatus": "cancelled",
+                        "executionLog": "\n".join(self.logs),
+                        "gpuType": self.node_meta.get("gpuType", "Unknown"),
+                    }
                 result = self._run_nvbandwidth()
                 results["nvbandwidth"] = result
                 if result.get("rawOutput"):
                     self.log(f"nvbandwidth命令输出:\n{result['rawOutput']}")
             if "p2p" in self.tests:
+                if self.cancelled.is_set():
+                    self.log("任务已被取消，停止执行p2p测试")
+                    return {
+                        "results": results,
+                        "overallStatus": "cancelled",
+                        "executionLog": "\n".join(self.logs),
+                        "gpuType": self.node_meta.get("gpuType", "Unknown"),
+                    }
                 result = self._run_p2p()
                 results["p2p"] = result
                 if result.get("rawOutput"):
                     self.log(f"p2pBandwidthLatencyTest命令输出:\n{result['rawOutput']}")
             if "nccl" in self.tests:
+                if self.cancelled.is_set():
+                    self.log("任务已被取消，停止执行nccl测试")
+                    return {
+                        "results": results,
+                        "overallStatus": "cancelled",
+                        "executionLog": "\n".join(self.logs),
+                        "gpuType": self.node_meta.get("gpuType", "Unknown"),
+                    }
                 result = self._run_nccl_tests()
                 results["nccl"] = result
                 if result.get("rawOutput"):
                     self.log(f"NCCL测试命令输出:\n{result['rawOutput']}")
             if "dcgm" in self.tests:
+                if self.cancelled.is_set():
+                    self.log("任务已被取消，停止执行dcgm测试")
+                    return {
+                        "results": results,
+                        "overallStatus": "cancelled",
+                        "executionLog": "\n".join(self.logs),
+                        "gpuType": self.node_meta.get("gpuType", "Unknown"),
+                    }
                 result = self._run_dcgm_diag()
                 results["dcgm"] = result
                 if result.get("rawOutput"):
                     self.log(f"DCGM诊断命令输出:\n{result['rawOutput']}")
             if "ib" in self.tests:
+                if self.cancelled.is_set():
+                    self.log("任务已被取消，停止执行ib测试")
+                    return {
+                        "results": results,
+                        "overallStatus": "cancelled",
+                        "executionLog": "\n".join(self.logs),
+                        "gpuType": self.node_meta.get("gpuType", "Unknown"),
+                    }
                 result = self._run_ib_check()
                 results["ib"] = result
                 if result.get("rawOutput"):
                     self.log(f"IB检查命令输出:\n{result['rawOutput']}")
+
+        if self.cancelled.is_set():
+            self.log("任务已被取消")
+            return {
+                "results": results,
+                "overallStatus": "cancelled",
+                "executionLog": "\n".join(self.logs),
+                "gpuType": self.node_meta.get("gpuType", "Unknown"),
+            }
 
         overall_pass = all(
             res.get("status") in ("passed", "skipped")
@@ -614,10 +692,27 @@ jobs_lock = threading.Lock()
 
 
 def sanitize_job(job: Dict[str, Any]) -> Dict[str, Any]:
-    job_copy = json.loads(json.dumps(job))
-    for node in job_copy.get("nodes", []):
-        if "_connection" in node:
-            node.pop("_connection", None)
+    # 创建副本，移除不能序列化的对象
+    job_copy = {}
+    for key, value in job.items():
+        if key == "cancelled":
+            # 将 Event 对象转换为布尔值
+            if isinstance(value, threading.Event):
+                job_copy[key] = value.is_set()
+            else:
+                job_copy[key] = value
+        elif key == "nodes":
+            # 处理节点列表
+            nodes_copy = []
+            for node in value:
+                node_copy = {}
+                for node_key, node_value in node.items():
+                    if node_key != "_connection":
+                        node_copy[node_key] = node_value
+                nodes_copy.append(node_copy)
+            job_copy[key] = nodes_copy
+        else:
+            job_copy[key] = value
     return job_copy
 
 
@@ -626,12 +721,12 @@ def start_job_worker(job_id: str):
     thread.start()
 
 
-def run_node_check(node: Dict[str, Any], tests: List[str], dcgm_level: str):
+def run_node_check(node: Dict[str, Any], tests: List[str], dcgm_level: str, cancelled_flag: Optional[threading.Event] = None):
     """在单个节点上执行健康检查（用于并发执行）"""
     node["status"] = "running"
     node["startedAt"] = utc_now()
     connection = node.get("_connection")
-    runner = RemoteNodeRunner(node, tests, dcgm_level, connection)
+    runner = RemoteNodeRunner(node, tests, dcgm_level, connection, cancelled_flag)
     try:
         node_result = runner.execute()
         node.update(node_result)
@@ -653,6 +748,10 @@ def run_job(job_id: str):
             return
         job["status"] = "running"
         job["updatedAt"] = utc_now()
+        # 创建取消标志
+        if "cancelled" not in job:
+            job["cancelled"] = threading.Event()
+        cancelled_flag = job["cancelled"]
         nodes = job["nodes"]
         tests = job["tests"]
         dcgm_level = job["dcgmLevel"]
@@ -663,19 +762,38 @@ def run_job(job_id: str):
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # 提交所有节点的检查任务
         future_to_node = {
-            executor.submit(run_node_check, node, tests, dcgm_level): node
+            executor.submit(run_node_check, node, tests, dcgm_level, cancelled_flag): node
             for node in nodes
         }
         
         # 等待所有任务完成
         for future in as_completed(future_to_node):
+            # 如果已取消，立即更新状态并退出，不等待剩余任务
+            if cancelled_flag.is_set():
+                logger.info("任务 %s 已被取消，立即更新状态为 cancelled", job_id)
+                # 立即更新状态为 cancelled
+                with jobs_lock:
+                    job = jobs.get(job_id)
+                    if job:
+                        job["status"] = "cancelled"
+                        job["updatedAt"] = utc_now()
+                        # 更新所有未完成的节点状态
+                        for node in job["nodes"]:
+                            if node["status"] in ("running", "cancelling"):
+                                node["status"] = "cancelled"
+                                if not node.get("completedAt"):
+                                    node["completedAt"] = utc_now()
+                # 不再等待剩余任务，直接返回
+                return
+            
             try:
                 future.result()
             except Exception as exc:  # pylint: disable=broad-except
                 node = future_to_node[future]
                 logger.exception("节点 %s 执行异常: %s", node.get("alias"), exc)
-                node["status"] = "failed"
-                node["executionLog"] = f"执行异常: {exc}"
+                if node["status"] == "running":
+                    node["status"] = "failed"
+                    node["executionLog"] = f"执行异常: {exc}"
 
     # 所有节点完成后，更新任务状态
     with jobs_lock:
@@ -683,11 +801,21 @@ def run_job(job_id: str):
         if not job:
             return
         job["updatedAt"] = utc_now()
-        job["status"] = (
-            "completed"
-            if all(node["status"] == "passed" for node in job["nodes"])
-            else "failed"
-        )
+        if cancelled_flag.is_set():
+            # 如果已经取消，确保状态是 cancelled
+            job["status"] = "cancelled"
+            # 更新所有未完成的节点状态（从 cancelling 或 running 转为 cancelled）
+            for node in job["nodes"]:
+                if node["status"] in ("running", "cancelling"):
+                    node["status"] = "cancelled"
+                    if not node.get("completedAt"):
+                        node["completedAt"] = utc_now()
+        else:
+            job["status"] = (
+                "completed"
+                if all(node["status"] == "passed" for node in job["nodes"])
+                else "failed"
+            )
 
 
 # -----------------------------------------------------------------------------
@@ -800,6 +928,7 @@ def api_create_job():
             "tests": tests,
             "dcgmLevel": dcgm_level,
             "nodes": [],
+            "cancelled": threading.Event(),
         }
 
         for node_payload in nodes_payload:
@@ -848,6 +977,59 @@ def api_list_jobs():
     with jobs_lock:
         data = [sanitize_job(job) for job in jobs.values()]
     return json_response(True, data=data)
+
+
+@app.route("/api/gpu-inspection/stop-job/<job_id>", methods=["POST"])
+def api_stop_job(job_id: str):
+    """停止正在运行的健康检查任务"""
+    try:
+        with jobs_lock:
+            job = jobs.get(job_id)
+            if not job:
+                return json_response(False, message="未找到Job", status=404)
+            
+            if job["status"] not in ("pending", "running", "cancelling"):
+                return json_response(False, message=f"任务状态为 {job['status']}，无法停止", status=400)
+            
+            # 设置取消标志
+            if "cancelled" in job:
+                job["cancelled"].set()
+            else:
+                job["cancelled"] = threading.Event()
+                job["cancelled"].set()
+            
+            # 如果任务状态是 running，立即更新为 cancelled（不再使用 cancelling 中间状态）
+            # 这样可以避免前端一直显示"取消中"
+            if job["status"] == "running":
+                job["status"] = "cancelled"
+                job["updatedAt"] = utc_now()
+                # 更新所有运行中的节点状态为 cancelled
+                for node in job.get("nodes", []):
+                    if node["status"] == "running":
+                        node["status"] = "cancelled"
+                        if not node.get("completedAt"):
+                            node["completedAt"] = utc_now()
+                logger.info("任务 %s 已立即标记为取消，共 %d 个节点", job_id, len([n for n in job.get("nodes", []) if n["status"] == "cancelled"]))
+            elif job["status"] == "cancelling":
+                # 如果已经是 cancelling，直接更新为 cancelled
+                job["status"] = "cancelled"
+                job["updatedAt"] = utc_now()
+                for node in job.get("nodes", []):
+                    if node["status"] == "cancelling":
+                        node["status"] = "cancelled"
+                        if not node.get("completedAt"):
+                            node["completedAt"] = utc_now()
+                logger.info("任务 %s 从 cancelling 更新为 cancelled", job_id)
+            else:
+                # pending 状态，更新为 cancelling（任务还没开始）
+                job["status"] = "cancelling"
+                job["updatedAt"] = utc_now()
+                logger.info("任务 %s 已标记为取消（pending状态）", job_id)
+        
+        return json_response(True, data={"jobId": job_id}, message="任务停止请求已发送")
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.exception("停止任务失败: %s", exc)
+        return json_response(False, message=str(exc), status=500)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ import {
   Play,
   Plus,
   Server,
+  Square,
   Terminal,
   Trash2,
   Upload,
@@ -335,8 +336,8 @@ const METRIC_LABELS = {
 }
 
 const STATUS_LABELS = {
-  zh: { passed: "通过", running: "执行中", failed: "异常" },
-  en: { passed: "Passed", running: "Running", failed: "Abnormal" },
+  zh: { passed: "通过", running: "执行中", failed: "异常", cancelled: "已取消", cancelling: "取消中" },
+  en: { passed: "Passed", running: "Running", failed: "Abnormal", cancelled: "Cancelled", cancelling: "Cancelling" },
 }
 
 const renderMetric = (metric?: JobMetric, unitHint = "GB/s", lang: "zh" | "en" = "zh") => {
@@ -387,6 +388,22 @@ const renderStatusBadge = (status: string, lang: "zh" | "en" = "zh") => {
       <Badge className="bg-blue-500/20 text-blue-400 border border-blue-500/40">
         <Loader2 className="w-3 h-3 mr-1 animate-spin" />
         {labels.running}
+      </Badge>
+    )
+  }
+  if (normalized === "cancelled") {
+    return (
+      <Badge className="bg-orange-500/20 text-orange-400 border border-orange-500/40">
+        <XCircle className="w-3 h-3 mr-1" />
+        {labels.cancelled}
+      </Badge>
+    )
+  }
+  if (normalized === "cancelling") {
+    return (
+      <Badge className="bg-yellow-500/20 text-yellow-400 border border-yellow-500/40">
+        <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+        {labels.cancelling}
       </Badge>
     )
   }
@@ -859,6 +876,50 @@ export default function BareMetal() {
     }
   }
 
+  const handleStopJob = async () => {
+    if (!currentJobId) {
+      toast({
+        title: tr("无法停止", "Cannot stop"),
+        description: tr("当前没有正在运行的任务", "No running task"),
+        variant: "destructive",
+      })
+      return
+    }
+    try {
+      await apiRequest(`/api/gpu-inspection/stop-job/${currentJobId}`, {
+        method: "POST",
+      })
+      toast({
+        title: tr("停止请求已发送", "Stop request sent"),
+        description: tr("任务正在停止中...", "Task is being stopped..."),
+      })
+      // 立即更新本地状态，显示取消中
+      if (currentJob) {
+        setCurrentJob({
+          ...currentJob,
+          status: "cancelling",
+          nodes: currentJob.nodes?.map((node) => ({
+            ...node,
+            status: node.status === "running" ? "cancelling" : node.status,
+          })),
+        })
+      }
+      // 立即触发一次状态查询，获取最新状态
+      try {
+        const data = await apiRequest<JobDetail>(`/api/gpu-inspection/job/${currentJobId}`)
+        setCurrentJob(data)
+      } catch (error) {
+        console.error("获取任务状态失败:", error)
+      }
+    } catch (error) {
+      toast({
+        title: tr("停止任务失败", "Failed to stop job"),
+        description: (error as Error).message,
+        variant: "destructive",
+      })
+    }
+  }
+
   useEffect(() => {
     if (!currentJobId) return
     let cancelled = false
@@ -869,7 +930,7 @@ export default function BareMetal() {
         const data = await apiRequest<JobDetail>(`/api/gpu-inspection/job/${currentJobId}`)
         if (cancelled) return
         setCurrentJob(data)
-        if (data.status === "completed" || data.status === "failed") {
+        if (data.status === "completed" || data.status === "failed" || data.status === "cancelled") {
           setIsPollingJob(false)
           const flattened = flattenJobNodes(data)
           if (flattened.length) {
@@ -885,8 +946,13 @@ export default function BareMetal() {
               })
             })
           }
+          const statusMessages = {
+            completed: tr("诊断完成", "Diagnostics finished"),
+            failed: tr("诊断失败", "Diagnostics failed"),
+            cancelled: tr("任务已取消", "Task cancelled"),
+          }
           toast({
-            title: data.status === "completed" ? tr("诊断完成", "Diagnostics finished") : tr("诊断失败", "Diagnostics failed"),
+            title: statusMessages[data.status as keyof typeof statusMessages] || tr("任务已结束", "Task finished"),
             description: `${tr("任务", "Job")} ${data.jobId} ${tr("已结束", "has finished")}`,
             variant: data.status === "completed" ? "default" : "destructive",
           })
@@ -1438,7 +1504,20 @@ export default function BareMetal() {
                     {tr("任务 ID", "Job ID")}: {currentJob.jobId}
                   </p>
                 </div>
-                <div>{renderStatusBadge(currentJob.status, language)}</div>
+                <div className="flex items-center gap-2">
+                  {renderStatusBadge(currentJob.status, language)}
+                  {(currentJob.status === "running" || currentJob.status === "pending") && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleStopJob}
+                      className="border-red-500/40 text-red-300 hover:bg-red-500/10"
+                    >
+                      <Square className="w-4 h-4 mr-1" />
+                      {tr("停止", "Stop")}
+                    </Button>
+                  )}
+                </div>
               </div>
 
               <div className="mt-4 grid md:grid-cols-2 gap-3">
