@@ -16,6 +16,7 @@ import os
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -625,6 +626,26 @@ def start_job_worker(job_id: str):
     thread.start()
 
 
+def run_node_check(node: Dict[str, Any], tests: List[str], dcgm_level: str):
+    """在单个节点上执行健康检查（用于并发执行）"""
+    node["status"] = "running"
+    node["startedAt"] = utc_now()
+    connection = node.get("_connection")
+    runner = RemoteNodeRunner(node, tests, dcgm_level, connection)
+    try:
+        node_result = runner.execute()
+        node.update(node_result)
+        node["status"] = node_result["overallStatus"]
+        node["completedAt"] = utc_now()
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.exception("节点 %s 执行失败: %s", node["alias"], exc)
+        node["status"] = "failed"
+        node["executionLog"] = "\n".join(runner.logs + [f"异常: {exc}"])
+    finally:
+        node.pop("_connection", None)
+    return node
+
+
 def run_job(job_id: str):
     with jobs_lock:
         job = jobs.get(job_id)
@@ -632,24 +653,31 @@ def run_job(job_id: str):
             return
         job["status"] = "running"
         job["updatedAt"] = utc_now()
+        nodes = job["nodes"]
+        tests = job["tests"]
+        dcgm_level = job["dcgmLevel"]
 
-    for node in job["nodes"]:
-        node["status"] = "running"
-        node["startedAt"] = utc_now()
-        connection = node.get("_connection")
-        runner = RemoteNodeRunner(node, job["tests"], job["dcgmLevel"], connection)
-        try:
-            node_result = runner.execute()
-            node.update(node_result)
-            node["status"] = node_result["overallStatus"]
-            node["completedAt"] = utc_now()
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.exception("节点 %s 执行失败: %s", node["alias"], exc)
-            node["status"] = "failed"
-            node["executionLog"] = "\n".join(runner.logs + [f"异常: {exc}"])
-        finally:
-            node.pop("_connection", None)
+    # 并发执行所有节点的检查
+    # 使用线程池，最大并发数等于节点数量（或限制为合理值，如10）
+    max_workers = min(len(nodes), 10)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 提交所有节点的检查任务
+        future_to_node = {
+            executor.submit(run_node_check, node, tests, dcgm_level): node
+            for node in nodes
+        }
+        
+        # 等待所有任务完成
+        for future in as_completed(future_to_node):
+            try:
+                future.result()
+            except Exception as exc:  # pylint: disable=broad-except
+                node = future_to_node[future]
+                logger.exception("节点 %s 执行异常: %s", node.get("alias"), exc)
+                node["status"] = "failed"
+                node["executionLog"] = f"执行异常: {exc}"
 
+    # 所有节点完成后，更新任务状态
     with jobs_lock:
         job = jobs.get(job_id)
         if not job:
@@ -697,9 +725,14 @@ def api_test_connection():
             hostname_res = session.run("hostname")
             gpu_res = session.run("nvidia-smi -L || true")
             driver_res = session.run("nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true")
+        gpu_lines = [line.strip() for line in gpu_res.stdout.splitlines() if line.strip()]
+        gpu_count = len(gpu_lines)
+        gpu_model = normalize_gpu_name(gpu_lines[0]) if gpu_lines else "Unknown"
         data = {
             "hostname": hostname_res.stdout.strip(),
-            "gpus": [line.strip() for line in gpu_res.stdout.splitlines() if line.strip()],
+            "gpus": gpu_lines,  # 保留完整列表用于兼容
+            "gpuModel": gpu_model,  # GPU型号
+            "gpuCount": gpu_count,  # GPU数量
             "driverVersion": driver_res.stdout.strip(),
         }
         logger.info("SSH连接测试成功: %s", data.get("hostname"))

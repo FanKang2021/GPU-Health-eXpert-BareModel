@@ -48,7 +48,9 @@ interface SSHConnectionPayload {
 
 interface SSHTestResult {
   hostname: string
-  gpus: string[]
+  gpus: string[]  // 保留用于兼容
+  gpuModel?: string  // GPU型号
+  gpuCount?: number  // GPU数量
   driverVersion?: string
 }
 
@@ -146,12 +148,18 @@ const sanitizeToken = (value: string, fallback: string) => {
 }
 
 const extractGpuModel = (summary?: SSHTestResult) => {
-  if (!summary?.gpus?.length) return ""
-  const first = summary.gpus[0]
-  const match = first.match(/NVIDIA\s+([A-Za-z0-9-]+)/i)
-  if (match?.[1]) return match[1].toLowerCase()
-  const parts = first.split(":")
-  return sanitizeToken(parts.pop()?.trim() || "", "gpu")
+  if (summary?.gpuModel) {
+    return sanitizeToken(summary.gpuModel, "gpu")
+  }
+  // 兼容旧数据：如果没有gpuModel，尝试从gpus中提取
+  if (summary?.gpus?.length) {
+    const first = summary.gpus[0]
+    const match = first.match(/NVIDIA\s+([A-Za-z0-9-]+)/i)
+    if (match?.[1]) return match[1].toLowerCase()
+    const parts = first.split(":")
+    return sanitizeToken(parts.pop()?.trim() || "", "gpu")
+  }
+  return ""
 }
 
 const formatJobName = (node: SelectedNode) => {
@@ -1122,7 +1130,9 @@ export default function BareMetal() {
                       </div>
                       <div className="text-xs text-green-100/70">
                         {tr("GPU：", "GPU: ")}
-                        {lastTestDetails.gpus?.length ? lastTestDetails.gpus.slice(0, 2).join(" / ") : tr("未知", "Unknown")}
+                        {lastTestDetails.gpuModel && lastTestDetails.gpuCount
+                          ? `${lastTestDetails.gpuModel} × ${lastTestDetails.gpuCount}`
+                          : tr("未知", "Unknown")}
                       </div>
                     </>
                   )}
@@ -1292,7 +1302,9 @@ export default function BareMetal() {
                         </td>
                         <td className="py-3 px-4 text-slate-300">{node.username}</td>
                         <td className="py-3 px-4 text-slate-300">
-                          {node.summary?.gpus?.length ? node.summary.gpus[0] : tr("待检测", "Pending")}
+                          {node.summary?.gpuModel && node.summary.gpuCount
+                            ? `${node.summary.gpuModel} × ${node.summary.gpuCount}`
+                            : tr("待检测", "Pending")}
                         </td>
                         <td className="py-3 px-4">
                           <Button
