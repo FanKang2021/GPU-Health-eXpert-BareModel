@@ -5,7 +5,7 @@ GHX Bare-Metal Orchestrator
 通过SSH在裸金属节点上运行GPU健康检查
 1. 支持SSH连接测试与基础命令检查
 2. 通过后台Job执行nvbandwidth/p2p/nccl/dcgm/ib检查
-3. 将nccl.tgz、nccl-tests.tgz、nvbandwidth、p2pBandwidthLatencyTest上传到目标主机的/tmp执行
+3. 将nccl-tests（预编译版本，本地解压后上传目录）、nvbandwidth、p2pBandwidthLatencyTest上传到目标主机的/tmp/ghx目录执行
 """
 from __future__ import annotations
 
@@ -13,6 +13,10 @@ import io
 import json
 import logging
 import os
+import re
+import shutil
+import tarfile
+import tempfile
 import threading
 import time
 import uuid
@@ -34,7 +38,6 @@ BASE_DIR = Path(__file__).resolve().parent
 ASSETS = {
     "nvbandwidth": BASE_DIR / "nvbandwidth",
     "p2p": BASE_DIR / "p2pBandwidthLatencyTest",
-    "nccl": BASE_DIR / "nccl.tgz",
     "nccl_tests": BASE_DIR / "nccl-tests.tgz",
     "ib_check": BASE_DIR / "assets" / "ib_health_check.sh",
 }
@@ -242,7 +245,7 @@ class SSHSession:
             sudo_password = auth.get("value")
         self.need_sudo = self.username != "root"
         self.sudo_password = sudo_password
-        self.sftp = None
+        self._sftp = None
 
     def __enter__(self):
         auth = self.connection.get("auth", {})
@@ -262,13 +265,20 @@ class SSHSession:
             raise ValueError("认证方式不支持")
 
         self.client.connect(**kwargs)
-        self.sftp = self.client.open_sftp()
+        self._sftp = None  # 延迟初始化
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.sftp:
-            self.sftp.close()
+        if self._sftp:
+            self._sftp.close()
         self.client.close()
+
+    @property
+    def sftp(self):
+        """延迟初始化SFTP，只在需要时打开"""
+        if self._sftp is None:
+            self._sftp = self.client.open_sftp()
+        return self._sftp
 
     def run(self, command: str, timeout: int = 300, require_root: bool = False) -> SSHCommandResult:
         wrapped = wrap_bash(command)
@@ -291,6 +301,27 @@ class SSHSession:
         self.sftp.put(posix_local, remote_path)
         if executable:
             self.run(f"chmod +x {remote_path}", require_root=self.need_sudo)
+    
+    def upload_directory(self, local_dir: Path, remote_dir: str):
+        """递归上传整个目录到远程"""
+        self.run(f"mkdir -p {remote_dir}")
+        for root, dirs, files in os.walk(local_dir):
+            # 计算相对路径
+            rel_root = Path(root).relative_to(local_dir)
+            remote_root = f"{remote_dir}/{rel_root.as_posix()}" if rel_root != Path('.') else remote_dir
+            
+            # 创建远程目录
+            if rel_root != Path('.'):
+                self.run(f"mkdir -p {remote_root}")
+            
+            # 上传文件
+            for file in files:
+                local_file = Path(root) / file
+                remote_file = f"{remote_root}/{file}"
+                self.sftp.put(str(local_file), remote_file)
+                # 如果是可执行文件，设置执行权限
+                if os.access(local_file, os.X_OK):
+                    self.run(f"chmod +x {remote_file}", require_root=self.need_sudo)
 
 
 # -----------------------------------------------------------------------------
@@ -375,7 +406,7 @@ class RemoteNodeRunner:
         self.tests = tests
         self.dcgm_level = dcgm_level
         self.connection = connection
-        self.remote_dir = f"/tmp/ghx/{node_meta['nodeId']}"
+        self.remote_dir = "/tmp/ghx"
         self.logs: List[str] = []
         self.session: Optional[SSHSession] = None
         self.cancelled = cancelled_flag or threading.Event()
@@ -602,22 +633,44 @@ class RemoteNodeRunner:
             if gpu_count == 0:
                 raise RuntimeError("未检测到GPU，无法运行NCCL测试")
             
-            self._upload_asset("nccl", "nccl.tgz", executable=False)
-            self._upload_asset("nccl_tests", "nccl-tests.tgz", executable=False)
-            script = f"""
-cd {self.remote_dir}
-rm -rf nccl nccl-tests
-mkdir -p nccl nccl-tests
-tar -xzf nccl.tgz -C nccl --strip-components=1
-tar -xzf nccl-tests.tgz -C nccl-tests --strip-components=1
-cd nccl
-make -j$(nproc)
-cd ../nccl-tests
-make -j$(nproc) NCCL_HOME={self.remote_dir}/nccl/build
-if [ ! -x build/all_reduce_perf ]; then chmod +x build/all_reduce_perf; fi
-./build/all_reduce_perf -b 1024 -e 1G -f 2 -g {gpu_count}
+            # 上传压缩包到远程并解压
+            nccl_tests_tgz = ASSETS["nccl_tests"]
+            if not nccl_tests_tgz.exists():
+                raise FileNotFoundError(f"nccl-tests.tgz 不存在: {nccl_tests_tgz}")
+            
+            remote_tgz = f"{self.remote_dir}/nccl-tests.tgz"
+            remote_nccl_dir = f"{self.remote_dir}/nccl-tests"
+            
+            # 上传压缩包
+            self.log("上传 nccl-tests.tgz 到远程节点")
+            self.session.upload(nccl_tests_tgz, remote_tgz)
+            
+            # 远程解压
+            self.log("在远程节点解压 nccl-tests.tgz")
+            extract_script = f"""
+rm -rf {remote_nccl_dir}
+tar -xzf {remote_tgz} -C {self.remote_dir}
+rm -f {remote_tgz}
 """
-            result = self.session.run(script, timeout=3600, require_root=True)
+            extract_result = self.session.run(extract_script, timeout=120)
+            if extract_result.exit_code != 0:
+                raise RuntimeError(f"解压失败: {extract_result.stderr}")
+            
+            # 运行 NCCL 测试
+            script = f"""
+# 确保可执行文件有执行权限
+if [ -f {remote_nccl_dir}/build/all_reduce_perf ]; then
+    chmod +x {remote_nccl_dir}/build/all_reduce_perf
+fi
+# 验证文件是否存在
+if [ ! -f {remote_nccl_dir}/build/all_reduce_perf ]; then
+    echo "错误: {remote_nccl_dir}/build/all_reduce_perf 不存在"
+    exit 1
+fi
+# 运行 NCCL 测试
+{remote_nccl_dir}/build/all_reduce_perf -b 1024 -e 1G -f 2 -g {gpu_count}
+"""
+            result = self.session.run(script, timeout=600, require_root=True)
             if result.exit_code != 0:
                 raise RuntimeError(result.stderr or "nccl-tests 执行失败")
             value = parse_nccl(result.stdout)
@@ -759,41 +812,44 @@ def run_job(job_id: str):
     # 并发执行所有节点的检查
     # 使用线程池，最大并发数等于节点数量（或限制为合理值，如10）
     max_workers = min(len(nodes), 10)
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # 提交所有节点的检查任务
-        future_to_node = {
-            executor.submit(run_node_check, node, tests, dcgm_level, cancelled_flag): node
-            for node in nodes
-        }
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # 提交所有节点的检查任务
+            future_to_node = {
+                executor.submit(run_node_check, node, tests, dcgm_level, cancelled_flag): node
+                for node in nodes
+            }
         
-        # 等待所有任务完成
-        for future in as_completed(future_to_node):
-            # 如果已取消，立即更新状态并退出，不等待剩余任务
-            if cancelled_flag.is_set():
-                logger.info("任务 %s 已被取消，立即更新状态为 cancelled", job_id)
-                # 立即更新状态为 cancelled
-                with jobs_lock:
-                    job = jobs.get(job_id)
-                    if job:
-                        job["status"] = "cancelled"
-                        job["updatedAt"] = utc_now()
-                        # 更新所有未完成的节点状态
-                        for node in job["nodes"]:
-                            if node["status"] in ("running", "cancelling"):
-                                node["status"] = "cancelled"
-                                if not node.get("completedAt"):
-                                    node["completedAt"] = utc_now()
-                # 不再等待剩余任务，直接返回
-                return
-            
-            try:
-                future.result()
-            except Exception as exc:  # pylint: disable=broad-except
-                node = future_to_node[future]
-                logger.exception("节点 %s 执行异常: %s", node.get("alias"), exc)
-                if node["status"] == "running":
-                    node["status"] = "failed"
-                    node["executionLog"] = f"执行异常: {exc}"
+            # 等待所有任务完成
+            for future in as_completed(future_to_node):
+                # 如果已取消，立即更新状态并退出，不等待剩余任务
+                if cancelled_flag.is_set():
+                    logger.info("任务 %s 已被取消，立即更新状态为 cancelled", job_id)
+                    # 立即更新状态为 cancelled
+                    with jobs_lock:
+                        job = jobs.get(job_id)
+                        if job:
+                            job["status"] = "cancelled"
+                            job["updatedAt"] = utc_now()
+                            # 更新所有未完成的节点状态
+                            for node in job["nodes"]:
+                                if node["status"] in ("running", "cancelling"):
+                                    node["status"] = "cancelled"
+                                    if not node.get("completedAt"):
+                                        node["completedAt"] = utc_now()
+                    # 不再等待剩余任务，直接返回
+                    return
+                
+                try:
+                    future.result()
+                except Exception as exc:  # pylint: disable=broad-except
+                    node = future_to_node[future]
+                    logger.exception("节点 %s 执行异常: %s", node.get("alias"), exc)
+                    if node["status"] == "running":
+                        node["status"] = "failed"
+                        node["executionLog"] = f"执行异常: {exc}"
+    finally:
+        pass
 
     # 所有节点完成后，更新任务状态
     with jobs_lock:
@@ -816,6 +872,7 @@ def run_job(job_id: str):
                 if all(node["status"] == "passed" for node in job["nodes"])
                 else "failed"
             )
+    
 
 
 # -----------------------------------------------------------------------------
@@ -853,22 +910,51 @@ def api_test_connection():
             hostname_res = session.run("hostname")
             gpu_res = session.run("nvidia-smi -L || true")
             driver_res = session.run("nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true")
+            # 获取内网IP（默认路由的出口IP）
+            internal_ip_res = session.run("ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \\K[0-9.]+' | head -n 1 || hostname -I | awk '{print $1}'")
         gpu_lines = [line.strip() for line in gpu_res.stdout.splitlines() if line.strip()]
         gpu_count = len(gpu_lines)
         gpu_model = normalize_gpu_name(gpu_lines[0]) if gpu_lines else "Unknown"
+        internal_ip = internal_ip_res.stdout.strip() if internal_ip_res.stdout.strip() else None
         data = {
             "hostname": hostname_res.stdout.strip(),
             "gpus": gpu_lines,  # 保留完整列表用于兼容
             "gpuModel": gpu_model,  # GPU型号
             "gpuCount": gpu_count,  # GPU数量
             "driverVersion": driver_res.stdout.strip(),
+            "internalIp": internal_ip,  # 内网IP
         }
-        logger.info("SSH连接测试成功: %s", data.get("hostname"))
+        logger.info("SSH连接测试成功: %s, 内网IP: %s", data.get("hostname"), internal_ip)
         return json_response(True, data=data, message="SSH连接成功")
     except Exception as exc:  # pylint: disable=broad-except
         error_msg = str(exc)
         logger.error("SSH连接测试失败: %s", error_msg, exc_info=True)
         return json_response(False, message=error_msg, status=400)
+
+
+def extract_cuda_version(nvcc_output: str) -> str:
+    """从 nvcc --version 输出中提取 CUDA 版本号"""
+    import re
+    # 匹配 "release X.Y" 或 "V X.Y.Z"
+    match = re.search(r'release\s+(\d+\.\d+)', nvcc_output)
+    if match:
+        return match.group(1)
+    match = re.search(r'V(\d+\.\d+)', nvcc_output)
+    if match:
+        return match.group(1)
+    return ""
+
+
+def extract_nccl_version(apt_output: str, package_name: str) -> str:
+    """从 apt list 输出中提取 NCCL 包版本"""
+    import re
+    for line in apt_output.splitlines():
+        if package_name in line and "[installed]" in line:
+            # 格式: libnccl2/unknown,now 2.28.9-1+cuda13.0 amd64 [installed]
+            match = re.search(r'(\d+\.\d+\.\d+)-\d+\+cuda(\d+\.\d+)', line)
+            if match:
+                return match.group(2)  # 返回 cuda 版本
+    return ""
 
 
 @app.route("/api/ssh/check-commands", methods=["POST"])
@@ -881,15 +967,121 @@ def api_check_commands():
         if not commands:
             raise ValueError("commands不能为空")
         results = {}
+        versions = {}
+        
         with SSHSession(connection) as session:
             for cmd in commands:
-                if "/" in cmd:
+                # 检查是否是包名（libnccl2, libnccl-dev）
+                if cmd in ("libnccl2", "libnccl-dev"):
+                    check_cmd = f"apt list --installed 2>/dev/null | grep -E '^{cmd}/' | grep '\\[installed\\]'"
+                    res = session.run(check_cmd)
+                    results[cmd] = bool(res.stdout.strip())
+                # 检查 nvidia_peermem 内核模块是否加载
+                elif cmd == "nvidia_peermem":
+                    check_cmd = "lsmod | grep nvidia_peermem"
+                    res = session.run(check_cmd)
+                    # 有输出说明模块已加载
+                    results[cmd] = bool(res.stdout.strip())
+                # 检查 nouveau 驱动是否已卸载（应该没有输出才是通过）
+                elif cmd == "nouveau_unloaded":
+                    check_cmd = "lsmod | grep nouveau"
+                    res = session.run(check_cmd)
+                    # 没有输出说明已卸载
+                    results[cmd] = not bool(res.stdout.strip())
+                # 检查 ACS 是否已关闭（所有都应该是减号，不能有 + 号）
+                elif cmd == "acsctl_disabled":
+                    # 检查 lspci 输出中 ACSCtl 行（需要 root 权限才能看到详细信息）
+                    check_cmd = "sudo lspci -vvv 2>/dev/null | grep -i acsctl || lspci -vvv 2>/dev/null | grep -i acsctl"
+                    res = session.run(check_cmd, require_root=True)
+                    acsctl_output = res.stdout.strip()
+                    if acsctl_output:
+                        # 检查是否有任何 + 号（如 SrcValid+ TransBlk+ 等）
+                        # 有 + 号表示 ACS 未完全关闭
+                        has_plus = '+' in acsctl_output
+                        results[cmd] = not has_plus
+                    else:
+                        # 没有 ACSCtl 输出，可能设备不支持 ACS，视为通过
+                        results[cmd] = True
+                # 检查 nvidia-fabricmanager 服务是否激活
+                elif cmd == "nvidia_fabricmanager_active":
+                    check_cmd = "systemctl is-active nvidia-fabricmanager.service 2>/dev/null || echo inactive"
+                    res = session.run(check_cmd)
+                    results[cmd] = res.stdout.strip() == "active"
+                # 检查 ulimit max locked memory 是否为 unlimited
+                # 注意：必须以root权限检查，因为测试是以root权限运行的
+                elif cmd == "ulimit_max_locked_memory":
+                    check_cmd = "ulimit -a 2>/dev/null"
+                    res = session.run(check_cmd, require_root=True)
+                    # 解析 ulimit -a 输出，查找 max locked memory 行
+                    value = None
+                    matched_line = None
+                    for line in res.stdout.splitlines():
+                        line_lower = line.lower()
+                        if "max locked memory" in line_lower:
+                            matched_line = line
+                            # 格式: "max locked memory           (kbytes, -l) 264176236"
+                            # 或者: "max locked memory           (kbytes, -l) unlimited"
+                            # 直接取最后一列（split() 会处理多个空格）
+                            parts = line.split()
+                            if parts:
+                                value = parts[-1].strip().lower()
+                            break
+                    is_unlimited = (value == "unlimited") if value else False
+                    logger.debug("ulimit_max_locked_memory检查(以root权限): 原始行='%s', 提取值='%s', 是否unlimited=%s, 结果=%s", 
+                               matched_line, value, is_unlimited, "通过" if is_unlimited else "失败")
+                    results[cmd] = is_unlimited
+                # 检查 ulimit max memory size 是否为 unlimited
+                # 注意：必须以root权限检查，因为测试是以root权限运行的
+                elif cmd == "ulimit_max_memory_size":
+                    check_cmd = "ulimit -a 2>/dev/null"
+                    res = session.run(check_cmd, require_root=True)
+                    # 解析 ulimit -a 输出，查找 max memory size 行
+                    value = None
+                    matched_line = None
+                    for line in res.stdout.splitlines():
+                        line_lower = line.lower()
+                        if "max memory size" in line_lower:
+                            matched_line = line
+                            # 格式: "max memory size             (kbytes, -m) unlimited"
+                            # 直接取最后一列（split() 会处理多个空格）
+                            parts = line.split()
+                            if parts:
+                                value = parts[-1].strip().lower()
+                            break
+                    is_unlimited = (value == "unlimited") if value else False
+                    logger.debug("ulimit_max_memory_size检查(以root权限): 原始行='%s', 提取值='%s', 是否unlimited=%s, 结果=%s", 
+                               matched_line, value, is_unlimited, "通过" if is_unlimited else "失败")
+                    results[cmd] = is_unlimited
+                elif "/" in cmd:
                     check_cmd = f"[ -x {cmd} ] && echo OK || echo MISSING"
+                    res = session.run(check_cmd)
+                    results[cmd] = res.stdout.strip() == "OK"
                 else:
                     check_cmd = f"command -v {cmd} >/dev/null 2>&1 && echo OK || echo MISSING"
-                res = session.run(check_cmd)
-                results[cmd] = res.stdout.strip() == "OK"
-        return json_response(True, data={"commands": results}, message="命令检查完成")
+                    res = session.run(check_cmd)
+                    results[cmd] = res.stdout.strip() == "OK"
+            
+            # 获取版本信息用于比对
+            nvcc_res = session.run("/usr/local/cuda/bin/nvcc --version 2>/dev/null || true")
+            apt_res = session.run("apt list --installed 2>/dev/null | grep -E '^libnccl' || true")
+            
+            nvcc_version = extract_cuda_version(nvcc_res.stdout)
+            libnccl2_version = extract_nccl_version(apt_res.stdout, "libnccl2")
+            libnccl_dev_version = extract_nccl_version(apt_res.stdout, "libnccl-dev")
+            
+            versions = {
+                "nvcc": nvcc_version,
+                "libnccl2": libnccl2_version,
+                "libncclDev": libnccl_dev_version,
+                "versionMatch": bool(
+                    nvcc_version and 
+                    libnccl2_version and 
+                    libnccl_dev_version and
+                    nvcc_version == libnccl2_version == libnccl_dev_version
+                )
+            }
+        
+        return json_response(True, data={"commands": results, "versions": versions}, message="命令检查完成")
     except Exception as exc:  # pylint: disable-broad-except
         logger.exception("命令检查失败: %s", exc)
         return json_response(False, message=str(exc), status=400)
@@ -977,6 +1169,243 @@ def api_list_jobs():
     with jobs_lock:
         data = [sanitize_job(job) for job in jobs.values()]
     return json_response(True, data=data)
+
+
+@app.route("/api/gpu-inspection/setup-ssh-trust", methods=["POST"])
+def api_setup_ssh_trust():
+    """配置多节点间SSH免密互信"""
+    try:
+        payload = request.get_json(force=True)
+        nodes = payload.get("nodes", [])  # 节点连接信息列表
+        
+        if len(nodes) < 2:
+            raise ValueError("至少需要2个节点来配置SSH互信")
+        
+        results = []
+        node_info = []  # 存储每个节点的信息：{connection, internal_ip, pubkey, display_name}
+        
+        # 第一步：收集所有节点的公钥和内网IP
+        logger.info("开始收集 %d 个节点的SSH公钥和内网IP", len(nodes))
+        for idx, node in enumerate(nodes):
+            host = node.get("host")
+            port = node.get("port", 22)
+            display_name = f"{host}:{port}"
+            
+            try:
+                with SSHSession(node) as session:
+                    # 确保 .ssh 目录存在
+                    session.run("mkdir -p /root/.ssh && chmod 700 /root/.ssh", require_root=True)
+                    
+                    # 获取内网IP
+                    internal_ip_res = session.run("ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \\K[0-9.]+' | head -n 1 || hostname -I | awk '{print $1}'")
+                    internal_ip = internal_ip_res.stdout.strip()
+                    if not internal_ip:
+                        raise RuntimeError("无法获取内网IP")
+                    
+                    # 检查是否已有密钥，没有则生成
+                    check_key = session.run("[ -f /root/.ssh/id_rsa ] && echo EXISTS || echo MISSING", require_root=True)
+                    if check_key.stdout.strip() == "MISSING":
+                        logger.info("为节点 %s (内网IP: %s) 生成SSH密钥对", display_name, internal_ip)
+                        session.run("ssh-keygen -t rsa -b 2048 -f /root/.ssh/id_rsa -N '' -q", require_root=True)
+                    
+                    # 获取公钥
+                    pubkey_result = session.run("cat /root/.ssh/id_rsa.pub", require_root=True)
+                    if pubkey_result.exit_code == 0 and pubkey_result.stdout.strip():
+                        node_info.append({
+                            "connection": node,
+                            "internal_ip": internal_ip,
+                            "pubkey": pubkey_result.stdout.strip(),
+                            "display_name": display_name,
+                            "idx": idx,
+                        })
+                        results.append({"host": display_name, "internalIp": internal_ip, "status": "pubkey_collected", "message": f"公钥已收集 (内网: {internal_ip})"})
+                        logger.info("节点 %s 公钥已收集，内网IP: %s", display_name, internal_ip)
+                    else:
+                        results.append({"host": display_name, "status": "error", "message": "无法获取公钥"})
+            except Exception as exc:
+                logger.error("收集节点 %s 公钥失败: %s", display_name, exc)
+                results.append({"host": display_name, "status": "error", "message": str(exc)})
+        
+        if len(node_info) < 2:
+            return json_response(False, message=f"成功收集的公钥数量不足({len(node_info)}个)，无法配置互信", data={"results": results}, status=400)
+        
+        # 第二步：将所有公钥分发到所有节点
+        logger.info("开始分发公钥到 %d 个节点", len(node_info))
+        authorized_keys_content = "\n".join([n["pubkey"] for n in node_info])
+        all_internal_ips = [n["internal_ip"] for n in node_info]
+        
+        for info in node_info:
+            display_name = info["display_name"]
+            try:
+                with SSHSession(info["connection"]) as session:
+                    # 写入 authorized_keys
+                    escaped_content = authorized_keys_content.replace("'", "'\\''")
+                    session.run(f"echo '{escaped_content}' > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys", require_root=True)
+                    
+                    # 配置 ssh_config 禁用 StrictHostKeyChecking
+                    session.run("grep -q 'StrictHostKeyChecking' /etc/ssh/ssh_config || echo 'StrictHostKeyChecking no' >> /etc/ssh/ssh_config", require_root=True)
+                    
+                    # 预填充 known_hosts（使用内网IP扫描所有节点）
+                    all_ips_str = " ".join(all_internal_ips)
+                    session.run(f"ssh-keyscan -t rsa {all_ips_str} >> /root/.ssh/known_hosts 2>/dev/null; sort -u /root/.ssh/known_hosts -o /root/.ssh/known_hosts", require_root=True)
+                    
+                    # 更新结果
+                    for r in results:
+                        if r["host"] == display_name:
+                            r["status"] = "success"
+                            r["message"] = f"SSH互信配置完成 (内网: {info['internal_ip']})"
+                            break
+                    logger.info("节点 %s SSH互信配置完成", display_name)
+            except Exception as exc:
+                logger.error("配置节点 %s SSH互信失败: %s", display_name, exc)
+                for r in results:
+                    if r["host"] == display_name:
+                        r["status"] = "error"
+                        r["message"] = f"分发公钥失败: {exc}"
+                        break
+        
+        success_count = sum(1 for r in results if r["status"] == "success")
+        return json_response(
+            True,
+            data={"results": results, "successCount": success_count, "totalCount": len(nodes)},
+            message=f"SSH互信配置完成: {success_count}/{len(nodes)} 个节点成功"
+        )
+    except Exception as exc:
+        logger.exception("配置SSH互信失败: %s", exc)
+        return json_response(False, message=str(exc), status=400)
+
+
+@app.route("/api/gpu-inspection/multi-node-nccl", methods=["POST"])
+def api_multi_node_nccl():
+    """多机mpirun NCCL测试"""
+    try:
+        payload = request.get_json(force=True)
+        hosts = payload.get("hosts", [])  # IP列表或hostfile内容
+        hostfile_content = payload.get("hostfileContent")  # hostfile内容
+        mpi_params = payload.get("mpiParams", {})  # 用户自定义mpirun参数
+        connection = payload.get("connection")  # 主节点SSH连接信息
+        
+        if not connection:
+            raise ValueError("缺少主节点SSH连接信息")
+        
+        # 解析hosts
+        if hostfile_content:
+            # 使用hostfile
+            host_list = [h.strip() for h in hostfile_content.strip().split('\n') if h.strip()]
+        elif hosts:
+            host_list = hosts
+        else:
+            raise ValueError("请提供hosts列表或hostfile内容")
+        
+        if len(host_list) < 2:
+            raise ValueError("多机测试至少需要2个节点")
+        
+        np_count = len(host_list)
+        
+        # 构建mpirun命令
+        mpi_cmd_parts = [
+            "mpirun",
+            f"-np {np_count}",
+            "--allow-run-as-root",
+            "-N 1",
+        ]
+        
+        # 使用hostfile或-host参数
+        if hostfile_content:
+            mpi_cmd_parts.append("-hostfile /tmp/ghx/hostfile")
+        else:
+            mpi_cmd_parts.append(f"-host {','.join(host_list)}")
+        
+        # 添加用户自定义参数
+        if mpi_params.get("btl_tcp_if"):
+            mpi_cmd_parts.append(f"--mca btl_tcp_if_include {mpi_params['btl_tcp_if']}")
+            mpi_cmd_parts.append(f"--mca oob_tcp_if_include {mpi_params['btl_tcp_if']}")
+        
+        if mpi_params.get("nccl_socket_ifname"):
+            mpi_cmd_parts.append(f"-x NCCL_SOCKET_IFNAME={mpi_params['nccl_socket_ifname']}")
+        
+        if mpi_params.get("nccl_ib_hca"):
+            mpi_cmd_parts.append(f"-x NCCL_IB_HCA={mpi_params['nccl_ib_hca']}")
+        
+        if mpi_params.get("ucx_net_devices"):
+            mpi_cmd_parts.append(f"-x UCX_NET_DEVICES={mpi_params['ucx_net_devices']}")
+        
+        if mpi_params.get("nccl_ib_qps"):
+            mpi_cmd_parts.append(f"-x NCCL_IB_QPS_PER_CONNECTION={mpi_params['nccl_ib_qps']}")
+        
+        if mpi_params.get("nccl_pxn_disable") is not None:
+            mpi_cmd_parts.append(f"-x NCCL_PXN_DISABLE={mpi_params['nccl_pxn_disable']}")
+        
+        if mpi_params.get("nccl_min_nchannels"):
+            mpi_cmd_parts.append(f"-x NCCL_MIN_NCHANNELS={mpi_params['nccl_min_nchannels']}")
+        
+        if mpi_params.get("nccl_nvls_enable") is not None:
+            mpi_cmd_parts.append(f"-x NCCL_NVLS_ENABLE={mpi_params['nccl_nvls_enable']}")
+        
+        if mpi_params.get("sharp_relaxed_ordering"):
+            mpi_cmd_parts.append("-x SHARP_COLL_ENABLE_PCI_RELAXED_ORDERING=1")
+        
+        # 额外的自定义参数
+        if mpi_params.get("extra"):
+            mpi_cmd_parts.append(mpi_params['extra'])
+        
+        # 添加nccl-tests命令
+        gpu_count = mpi_params.get("gpuPerNode", 8)
+        mpi_cmd_parts.append(f"/tmp/ghx/nccl-tests/build/all_reduce_perf -b 128M -e 16G -f 2 -g {gpu_count}")
+        
+        mpi_command = " \\\n".join(mpi_cmd_parts)
+        
+        # 连接主节点执行
+        with SSHSession(connection) as session:
+            session.run("mkdir -p /tmp/ghx")
+            
+            # 如果使用hostfile，先上传
+            if hostfile_content:
+                hostfile_path = "/tmp/ghx/hostfile"
+                session.run(f"cat > {hostfile_path} << 'EOF'\n{hostfile_content}\nEOF")
+            
+            # 检查nccl-tests是否存在，不存在则上传并解压
+            check_res = session.run("[ -f /tmp/ghx/nccl-tests/build/all_reduce_perf ] && echo OK || echo MISSING")
+            if check_res.stdout.strip() != "OK":
+                logger.info("nccl-tests 不存在，开始上传并解压")
+                nccl_tests_tgz = ASSETS["nccl_tests"]
+                if not nccl_tests_tgz.exists():
+                    return json_response(False, message="nccl-tests.tgz 文件不存在", status=400)
+                
+                # 上传压缩包
+                remote_tgz = "/tmp/ghx/nccl-tests.tgz"
+                session.upload(nccl_tests_tgz, remote_tgz)
+                
+                # 解压
+                extract_result = session.run(f"tar -xzf {remote_tgz} -C /tmp/ghx && rm -f {remote_tgz}")
+                if extract_result.exit_code != 0:
+                    return json_response(False, message=f"解压 nccl-tests 失败: {extract_result.stderr}", status=400)
+                
+                # 再次检查
+                check_res = session.run("[ -f /tmp/ghx/nccl-tests/build/all_reduce_perf ] && echo OK || echo MISSING")
+                if check_res.stdout.strip() != "OK":
+                    return json_response(False, message="nccl-tests 解压后仍未找到 all_reduce_perf", status=400)
+            
+            # 执行mpirun命令
+            logger.info("执行多机NCCL测试: %s", mpi_command)
+            result = session.run(mpi_command, timeout=1800, require_root=True)
+            
+            # 解析结果
+            value = parse_nccl(result.stdout)
+            
+            return json_response(True, data={
+                "command": mpi_command,
+                "hosts": host_list,
+                "nodeCount": np_count,
+                "exitCode": result.exit_code,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "bandwidth": value if value > 0 else None,
+                "passed": result.exit_code == 0,
+            }, message="多机NCCL测试完成")
+    except Exception as exc:
+        logger.exception("多机NCCL测试失败: %s", exc)
+        return json_response(False, message=str(exc), status=400)
 
 
 @app.route("/api/gpu-inspection/stop-job/<job_id>", methods=["POST"])

@@ -12,7 +12,6 @@ services:
       # 挂载资产文件（可选，如果镜像中已包含则无需挂载）
       - ./nvbandwidth:/app/nvbandwidth:ro
       - ./p2pBandwidthLatencyTest:/app/p2pBandwidthLatencyTest:ro
-      - ./nccl.tgz:/app/nccl.tgz:ro
       - ./nccl-tests.tgz:/app/nccl-tests.tgz:ro
       # 挂载GPU基准值配置文件（支持热更新）
       - ./config/gpu-benchmarks.json:/app/config/gpu-benchmarks.json:ro
