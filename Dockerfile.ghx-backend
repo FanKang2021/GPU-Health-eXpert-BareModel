@@ -18,7 +18,7 @@ RUN sed -i 's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g' /etc
   && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt baremetal_server.py ./ 
-COPY nvbandwidth p2pBandwidthLatencyTest nccl-tests-12.tgz nccl-tests-13.tgz ib_health_check.sh assets/
+COPY nvbandwidth p2pBandwidthLatencyTest nccl.tgz nccl-tests.tgz ib_health_check.sh assets/
 COPY config/gpu-benchmarks.json config/
 
 RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple

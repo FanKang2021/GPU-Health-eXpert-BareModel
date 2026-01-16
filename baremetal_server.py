@@ -5,7 +5,7 @@ GHX Bare-Metal Orchestrator
 通过SSH在裸金属节点上运行GPU健康检查
 1. 支持SSH连接测试与基础命令检查
 2. 通过后台Job执行nvbandwidth/p2p/nccl/dcgm/ib检查
-3. 将nvbandwidth、p2pBandwidthLatencyTest上传到目标主机的/tmp/ghx目录执行；根据CUDA版本（12.x或13.x）自动选择对应的预编译nccl-tests包（nccl-tests-12.tgz或nccl-tests-13.tgz）上传并解压到/tmp/ghx目录
+3. 将nvbandwidth、p2pBandwidthLatencyTest上传到目标主机的/tmp/ghx目录执行；上传nccl.tgz和nccl-tests.tgz源码到目标主机并在本地编译（适配CUDA和GLIBC版本）
 """
 from __future__ import annotations
 
@@ -40,8 +40,8 @@ ASSET_DIR = Path(os.getenv("GHX_ASSET_DIR", str(BASE_DIR)))
 ASSETS = {
     "nvbandwidth": ASSET_DIR / "nvbandwidth",
     "p2p": ASSET_DIR / "p2pBandwidthLatencyTest",
-    "nccl_tests_12": ASSET_DIR / "nccl-tests-12.tgz",
-    "nccl_tests_13": ASSET_DIR / "nccl-tests-13.tgz",
+    "nccl": ASSET_DIR / "nccl.tgz",
+    "nccl_tests": ASSET_DIR / "nccl-tests.tgz",
     "ib_check": ASSET_DIR / "ib_health_check.sh",
 }
 
@@ -644,46 +644,69 @@ class RemoteNodeRunner:
             if gpu_count == 0:
                 raise RuntimeError("未检测到GPU，无法运行NCCL测试")
             
-            # 检测 CUDA 版本
-            self.log("检测 CUDA 版本")
-            nvcc_res = self.session.run("/usr/local/cuda/bin/nvcc --version 2>/dev/null || true")
-            cuda_version = extract_cuda_version(nvcc_res.stdout)
-            if not cuda_version:
-                raise RuntimeError("无法检测 CUDA 版本")
-            
-            self.log(f"检测到 CUDA 版本: {cuda_version}")
-            
-            # 根据 CUDA 版本选择对应的预编译包
-            if cuda_version.startswith("12."):
-                nccl_tests_tgz = ASSETS["nccl_tests_12"]
-                asset_name = "nccl-tests-12.tgz"
-            elif cuda_version.startswith("13."):
-                nccl_tests_tgz = ASSETS["nccl_tests_13"]
-                asset_name = "nccl-tests-13.tgz"
+            # 检查nccl-tests是否已编译
+            check_res = self.session.run(f"[ -f {self.remote_dir}/nccl-tests/build/all_reduce_perf ] && echo OK || echo MISSING")
+            if check_res.stdout.strip() == "OK":
+                self.log("nccl-tests 已存在，跳过编译")
             else:
-                raise RuntimeError(f"不支持的 CUDA 版本: {cuda_version}，仅支持 12.x 和 13.x")
-            
-            if not nccl_tests_tgz.exists():
-                raise FileNotFoundError(f"{asset_name} 不存在: {nccl_tests_tgz}")
-            
-            remote_nccl_tests_tgz = f"{self.remote_dir}/{asset_name}"
-            remote_nccl_tests_dir = f"{self.remote_dir}/nccl-tests"
-            
-            # 上传压缩包
-            self.log(f"上传 {asset_name} 到远程节点")
-            self.session.upload(nccl_tests_tgz, remote_nccl_tests_tgz)
-            
-            # 解压预编译包
-            self.log("在远程节点解压 nccl-tests")
-            extract_script = f"""
+                # 上传并编译 nccl 和 nccl-tests
+                nccl_tgz = ASSETS["nccl"]
+                nccl_tests_tgz = ASSETS["nccl_tests"]
+                
+                if not nccl_tgz.exists():
+                    raise FileNotFoundError(f"nccl.tgz 不存在: {nccl_tgz}")
+                if not nccl_tests_tgz.exists():
+                    raise FileNotFoundError(f"nccl-tests.tgz 不存在: {nccl_tests_tgz}")
+                
+                remote_nccl_tgz = f"{self.remote_dir}/nccl.tgz"
+                remote_nccl_tests_tgz = f"{self.remote_dir}/nccl-tests.tgz"
+                remote_nccl_dir = f"{self.remote_dir}/nccl"
+                remote_nccl_tests_dir = f"{self.remote_dir}/nccl-tests"
+                
+                # 上传压缩包
+                self.log("上传 nccl.tgz 和 nccl-tests.tgz 到远程节点")
+                self.session.upload(nccl_tgz, remote_nccl_tgz)
+                self.session.upload(nccl_tests_tgz, remote_nccl_tests_tgz)
+                
+                # 编译 nccl 和 nccl-tests
+                self.log("在远程节点编译 nccl 和 nccl-tests")
+                compile_script = f"""
 set -e
 # 清理旧目录
-rm -rf {remote_nccl_tests_dir}
+rm -rf {remote_nccl_dir} {remote_nccl_tests_dir}
+
+# 解压 nccl
+echo "解压 nccl.tgz..."
+tar -xzf {remote_nccl_tgz} -C {self.remote_dir}
+rm -f {remote_nccl_tgz}
+
+# 编译 nccl
+echo "编译 nccl..."
+cd {remote_nccl_dir}
+make -j$(nproc) CUDA_HOME=/usr/local/cuda 2>&1 | tee /tmp/nccl_build.log
+if [ $? -ne 0 ]; then
+    echo "错误: nccl 编译失败"
+    cat /tmp/nccl_build.log
+    exit 1
+fi
+
+# 设置 NCCL_HOME
+export NCCL_HOME={remote_nccl_dir}
 
 # 解压 nccl-tests
-echo "解压 {asset_name}..."
+echo "解压 nccl-tests.tgz..."
 tar -xzf {remote_nccl_tests_tgz} -C {self.remote_dir}
 rm -f {remote_nccl_tests_tgz}
+
+# 编译 nccl-tests
+echo "编译 nccl-tests..."
+cd {remote_nccl_tests_dir}
+make -j$(nproc) CUDA_HOME=/usr/local/cuda NCCL_HOME=$NCCL_HOME 2>&1 | tee /tmp/nccl_tests_build.log
+if [ $? -ne 0 ]; then
+    echo "错误: nccl-tests 编译失败"
+    cat /tmp/nccl_tests_build.log
+    exit 1
+fi
 
 # 验证文件是否存在
 if [ ! -f {remote_nccl_tests_dir}/build/all_reduce_perf ]; then
@@ -692,16 +715,16 @@ if [ ! -f {remote_nccl_tests_dir}/build/all_reduce_perf ]; then
 fi
 
 chmod +x {remote_nccl_tests_dir}/build/all_reduce_perf
-echo "解压完成"
+echo "编译完成"
 """
-            extract_result = self.session.run(extract_script, timeout=120, require_root=True)
-            if extract_result.exit_code != 0:
-                raise RuntimeError(f"解压失败: {extract_result.stderr or extract_result.stdout}")
+                compile_result = self.session.run(compile_script, timeout=600, require_root=True)
+                if compile_result.exit_code != 0:
+                    raise RuntimeError(f"编译失败: {compile_result.stderr or compile_result.stdout}")
             
             # 运行 NCCL 测试
             self.log("运行 NCCL 测试")
             test_script = f"""
-{remote_nccl_tests_dir}/build/all_reduce_perf -b 1024 -e 1G -f 2 -g {gpu_count}
+{self.remote_dir}/nccl-tests/build/all_reduce_perf -b 1024 -e 1G -f 2 -g {gpu_count}
 """
             result = self.session.run(test_script, timeout=600, require_root=True)
             if result.exit_code != 0:
@@ -1360,22 +1383,28 @@ def api_setup_ssh_trust():
         return json_response(False, message=str(exc), status=400)
 
 
-@app.route("/api/gpu-inspection/multi-node-nccl", methods=["POST"])
-def api_multi_node_nccl():
-    """多机mpirun NCCL测试"""
+# 多机测试任务存储（类似 jobs，但结构更简单）
+multi_node_tests: Dict[str, Dict[str, Any]] = {}
+multi_node_tests_lock = threading.Lock()
+
+
+def run_multi_node_nccl_task(test_id: str, payload: Dict[str, Any]):
+    """在后台线程中执行多机NCCL测试"""
     try:
-        payload = request.get_json(force=True)
-        hosts = payload.get("hosts", [])  # IP列表或hostfile内容
-        hostfile_content = payload.get("hostfileContent")  # hostfile内容
-        mpi_params = payload.get("mpiParams", {})  # 用户自定义mpirun参数
-        connection = payload.get("connection")  # 主节点SSH连接信息
+        with multi_node_tests_lock:
+            test = multi_node_tests.get(test_id)
+            if not test:
+                return
+            test["status"] = "running"
+            test["startedAt"] = utc_now()
         
-        if not connection:
-            raise ValueError("缺少主节点SSH连接信息")
+        hosts = payload.get("hosts", [])
+        hostfile_content = payload.get("hostfileContent")
+        mpi_params = payload.get("mpiParams", {})
+        connection = payload.get("connection")
         
         # 解析hosts
         if hostfile_content:
-            # 使用hostfile
             host_list = [h.strip() for h in hostfile_content.strip().split('\n') if h.strip()]
         elif hosts:
             host_list = hosts
@@ -1395,7 +1424,6 @@ def api_multi_node_nccl():
             "-N 1",
         ]
         
-        # 使用hostfile或-host参数
         if hostfile_content:
             mpi_cmd_parts.append("-hostfile /tmp/ghx/hostfile")
         else:
@@ -1430,11 +1458,9 @@ def api_multi_node_nccl():
         if mpi_params.get("sharp_relaxed_ordering"):
             mpi_cmd_parts.append("-x SHARP_COLL_ENABLE_PCI_RELAXED_ORDERING=1")
         
-        # 额外的自定义参数
         if mpi_params.get("extra"):
             mpi_cmd_parts.append(mpi_params['extra'])
         
-        # 添加nccl-tests命令
         gpu_count = mpi_params.get("gpuPerNode", 8)
         mpi_cmd_parts.append(f"/tmp/ghx/nccl-tests/build/all_reduce_perf -b 128M -e 16G -f 2 -g {gpu_count}")
         
@@ -1444,69 +1470,176 @@ def api_multi_node_nccl():
         with SSHSession(connection) as session:
             session.run("mkdir -p /tmp/ghx")
             
-            # 如果使用hostfile，先上传
             if hostfile_content:
                 hostfile_path = "/tmp/ghx/hostfile"
                 session.run(f"cat > {hostfile_path} << 'EOF'\n{hostfile_content}\nEOF")
             
-            # 检查nccl-tests是否存在，不存在则上传并解压
+            # 检查主节点nccl-tests是否存在，不存在则上传并编译
             check_res = session.run("[ -f /tmp/ghx/nccl-tests/build/all_reduce_perf ] && echo OK || echo MISSING")
             if check_res.stdout.strip() != "OK":
-                logger.info("nccl-tests 不存在，开始检测 CUDA 版本并上传对应预编译包")
+                logger.info("主节点 nccl-tests 不存在，开始上传源码并编译")
                 
-                # 检测 CUDA 版本
-                nvcc_res = session.run("/usr/local/cuda/bin/nvcc --version 2>/dev/null || true")
-                cuda_version = extract_cuda_version(nvcc_res.stdout)
-                if not cuda_version:
-                    return json_response(False, message="无法检测 CUDA 版本", status=400)
+                nccl_tgz = ASSETS["nccl"]
+                nccl_tests_tgz = ASSETS["nccl_tests"]
                 
-                logger.info("检测到 CUDA 版本: %s", cuda_version)
-                
-                # 根据 CUDA 版本选择对应的预编译包
-                if cuda_version.startswith("12."):
-                    nccl_tests_tgz = ASSETS["nccl_tests_12"]
-                    asset_name = "nccl-tests-12.tgz"
-                elif cuda_version.startswith("13."):
-                    nccl_tests_tgz = ASSETS["nccl_tests_13"]
-                    asset_name = "nccl-tests-13.tgz"
-                else:
-                    return json_response(False, message=f"不支持的 CUDA 版本: {cuda_version}，仅支持 12.x 和 13.x", status=400)
-                
+                if not nccl_tgz.exists():
+                    raise FileNotFoundError(f"nccl.tgz 文件不存在: {nccl_tgz}")
                 if not nccl_tests_tgz.exists():
-                    return json_response(False, message=f"{asset_name} 文件不存在", status=400)
+                    raise FileNotFoundError(f"nccl-tests.tgz 文件不存在: {nccl_tests_tgz}")
                 
-                # 上传压缩包
-                remote_nccl_tests_tgz = f"/tmp/ghx/{asset_name}"
+                remote_nccl_tgz = "/tmp/ghx/nccl.tgz"
+                remote_nccl_tests_tgz = "/tmp/ghx/nccl-tests.tgz"
+                session.upload(nccl_tgz, remote_nccl_tgz)
                 session.upload(nccl_tests_tgz, remote_nccl_tests_tgz)
                 
-                # 解压预编译包
-                extract_script = f"""
+                compile_script = """
 set -e
-# 清理旧目录
-rm -rf /tmp/ghx/nccl-tests
-
-# 解压 nccl-tests
-echo "解压 {asset_name}..."
-tar -xzf {remote_nccl_tests_tgz} -C /tmp/ghx
-rm -f {remote_nccl_tests_tgz}
-
-# 验证文件是否存在
+rm -rf /tmp/ghx/nccl /tmp/ghx/nccl-tests
+echo "解压 nccl.tgz..."
+tar -xzf /tmp/ghx/nccl.tgz -C /tmp/ghx
+rm -f /tmp/ghx/nccl.tgz
+echo "编译 nccl..."
+cd /tmp/ghx/nccl
+make -j$(nproc) CUDA_HOME=/usr/local/cuda 2>&1 | tee /tmp/nccl_build.log
+if [ $? -ne 0 ]; then
+    echo "错误: nccl 编译失败"
+    cat /tmp/nccl_build.log
+    exit 1
+fi
+export NCCL_HOME=/tmp/ghx/nccl
+echo "解压 nccl-tests.tgz..."
+tar -xzf /tmp/ghx/nccl-tests.tgz -C /tmp/ghx
+rm -f /tmp/ghx/nccl-tests.tgz
+echo "编译 nccl-tests..."
+cd /tmp/ghx/nccl-tests
+make -j$(nproc) CUDA_HOME=/usr/local/cuda NCCL_HOME=$NCCL_HOME 2>&1 | tee /tmp/nccl_tests_build.log
+if [ $? -ne 0 ]; then
+    echo "错误: nccl-tests 编译失败"
+    cat /tmp/nccl_tests_build.log
+    exit 1
+fi
 if [ ! -f /tmp/ghx/nccl-tests/build/all_reduce_perf ]; then
     echo "错误: /tmp/ghx/nccl-tests/build/all_reduce_perf 不存在"
     exit 1
 fi
-
 chmod +x /tmp/ghx/nccl-tests/build/all_reduce_perf
-echo "解压完成"
+echo "编译完成"
 """
-                extract_result = session.run(extract_script, timeout=120, require_root=True)
-                if extract_result.exit_code != 0:
-                    return json_response(False, message=f"解压失败: {extract_result.stderr or extract_result.stdout}", status=400)
+                compile_result = session.run(compile_script, timeout=600, require_root=True)
+                if compile_result.exit_code != 0:
+                    raise RuntimeError(f"编译失败: {compile_result.stderr or compile_result.stdout}")
                 
-                # 再次检查
                 check_res = session.run("[ -f /tmp/ghx/nccl-tests/build/all_reduce_perf ] && echo OK || echo MISSING")
                 if check_res.stdout.strip() != "OK":
-                    return json_response(False, message="nccl-tests 解压后仍未找到 all_reduce_perf", status=400)
+                    raise RuntimeError("nccl-tests 编译后仍未找到 all_reduce_perf")
+            
+            # 为所有其他节点上传源码并编译
+            master_host = host_list[0]
+            other_hosts = host_list[1:]
+            
+            if other_hosts:
+                logger.info("开始为其他 %d 个节点并发上传源码并编译 nccl-tests", len(other_hosts))
+                
+                nccl_tgz = ASSETS["nccl"]
+                nccl_tests_tgz = ASSETS["nccl_tests"]
+                
+                temp_nccl_path = "/tmp/ghx/nccl.tgz"
+                temp_nccl_tests_path = "/tmp/ghx/nccl-tests.tgz"
+                session.upload(nccl_tgz, temp_nccl_path)
+                session.upload(nccl_tests_tgz, temp_nccl_tests_path)
+                
+                def upload_and_compile_node(host: str) -> tuple[str, bool, str]:
+                    try:
+                        # 先检查节点是否已有 nccl-tests
+                        check_script = f"""
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 {host} "[ -f /tmp/ghx/nccl-tests/build/all_reduce_perf ] && echo OK || echo MISSING" 2>/dev/null || echo "MISSING"
+"""
+                        check_result = session.run(check_script, timeout=30, require_root=True)
+                        if check_result.stdout.strip() == "OK":
+                            logger.info("节点 %s 已存在 nccl-tests，跳过编译", host)
+                            return (host, True, "")
+                        
+                        logger.info("开始为节点 %s 上传源码并编译 nccl-tests", host)
+                        upload_and_compile_script = f"""
+set -e
+echo "上传源码到节点 {host}..."
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 {host} "mkdir -p /tmp/ghx" || exit 1
+scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 {temp_nccl_path} {host}:/tmp/ghx/nccl.tgz || exit 1
+scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 {temp_nccl_tests_path} {host}:/tmp/ghx/nccl-tests.tgz || exit 1
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 {host} << 'REMOTE_SCRIPT'
+set -e
+rm -rf /tmp/ghx/nccl /tmp/ghx/nccl-tests
+echo "解压 nccl.tgz..."
+tar -xzf /tmp/ghx/nccl.tgz -C /tmp/ghx
+rm -f /tmp/ghx/nccl.tgz
+echo "编译 nccl..."
+cd /tmp/ghx/nccl
+make -j$(nproc) CUDA_HOME=/usr/local/cuda 2>&1 | tee /tmp/nccl_build.log
+if [ $? -ne 0 ]; then
+    echo "错误: nccl 编译失败"
+    cat /tmp/nccl_build.log
+    exit 1
+fi
+export NCCL_HOME=/tmp/ghx/nccl
+echo "解压 nccl-tests.tgz..."
+tar -xzf /tmp/ghx/nccl-tests.tgz -C /tmp/ghx
+rm -f /tmp/ghx/nccl-tests.tgz
+echo "编译 nccl-tests..."
+cd /tmp/ghx/nccl-tests
+make -j$(nproc) CUDA_HOME=/usr/local/cuda NCCL_HOME=$NCCL_HOME 2>&1 | tee /tmp/nccl_tests_build.log
+if [ $? -ne 0 ]; then
+    echo "错误: nccl-tests 编译失败"
+    cat /tmp/nccl_tests_build.log
+    exit 1
+fi
+if [ ! -f /tmp/ghx/nccl-tests/build/all_reduce_perf ]; then
+    echo "错误: /tmp/ghx/nccl-tests/build/all_reduce_perf 不存在"
+    exit 1
+fi
+chmod +x /tmp/ghx/nccl-tests/build/all_reduce_perf
+echo "节点 {host} 编译完成"
+REMOTE_SCRIPT
+if [ $? -eq 0 ]; then
+    echo "节点 {host} 编译成功"
+else
+    echo "节点 {host} 编译失败"
+    exit 1
+fi
+"""
+                        compile_result = session.run(upload_and_compile_script, timeout=600, require_root=True)
+                        if compile_result.exit_code != 0:
+                            error_msg = compile_result.stderr or compile_result.stdout or "未知错误"
+                            logger.error("节点 %s 编译失败: %s", host, error_msg)
+                            return (host, False, error_msg)
+                        else:
+                            logger.info("节点 %s 编译成功", host)
+                            return (host, True, "")
+                    except Exception as exc:
+                        error_msg = str(exc)
+                        logger.exception("节点 %s 编译异常: %s", host, error_msg)
+                        return (host, False, error_msg)
+                
+                failed_hosts = []
+                with ThreadPoolExecutor(max_workers=min(len(other_hosts), 10)) as executor:
+                    future_to_host = {executor.submit(upload_and_compile_node, host): host for host in other_hosts}
+                    for future in as_completed(future_to_host):
+                        host = future_to_host[future]
+                        try:
+                            result_host, success, error_msg = future.result()
+                            if not success:
+                                failed_hosts.append((result_host, error_msg))
+                        except Exception as exc:
+                            logger.exception("节点 %s 任务执行异常: %s", host, exc)
+                            failed_hosts.append((host, str(exc)))
+                
+                session.run(f"rm -f {temp_nccl_path} {temp_nccl_tests_path}", require_root=True)
+                
+                if failed_hosts:
+                    error_msg = f"以下节点编译失败: {', '.join([h for h, _ in failed_hosts])}\n请确保：\n1. SSH免密已配置\n2. 节点之间网络连通\n3. 节点有足够的编译工具"
+                    logger.error("部分节点编译失败: %s", ', '.join([h for h, _ in failed_hosts]))
+                    raise RuntimeError(error_msg)
+                
+                logger.info("所有节点 nccl-tests 编译完成")
             
             # 执行mpirun命令
             logger.info("执行多机NCCL测试: %s", mpi_command)
@@ -1515,19 +1648,88 @@ echo "解压完成"
             # 解析结果
             value = parse_nccl(result.stdout)
             
-            return json_response(True, data={
-                "command": mpi_command,
-                "hosts": host_list,
-                "nodeCount": np_count,
-                "exitCode": result.exit_code,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "bandwidth": value if value > 0 else None,
-                "passed": result.exit_code == 0,
-            }, message="多机NCCL测试完成")
+            with multi_node_tests_lock:
+                test = multi_node_tests.get(test_id)
+                if test:
+                    test["status"] = "completed"
+                    test["completedAt"] = utc_now()
+                    test["result"] = {
+                        "command": mpi_command,
+                        "hosts": host_list,
+                        "nodeCount": np_count,
+                        "exitCode": result.exit_code,
+                        "stdout": result.stdout,
+                        "stderr": result.stderr,
+                        "bandwidth": value if value > 0 else None,
+                        "passed": result.exit_code == 0,
+                    }
     except Exception as exc:
         logger.exception("多机NCCL测试失败: %s", exc)
+        with multi_node_tests_lock:
+            test = multi_node_tests.get(test_id)
+            if test:
+                test["status"] = "failed"
+                test["completedAt"] = utc_now()
+                test["error"] = str(exc)
+
+
+@app.route("/api/gpu-inspection/multi-node-nccl", methods=["POST"])
+def api_multi_node_nccl():
+    """多机mpirun NCCL测试（异步）"""
+    try:
+        payload = request.get_json(force=True)
+        connection = payload.get("connection")
+        
+        if not connection:
+            raise ValueError("缺少主节点SSH连接信息")
+        
+        # 创建测试任务ID
+        test_id = str(uuid.uuid4())
+        
+        # 创建测试任务记录
+        with multi_node_tests_lock:
+            multi_node_tests[test_id] = {
+                "id": test_id,
+                "status": "pending",
+                "createdAt": utc_now(),
+                "payload": payload,
+            }
+        
+        # 在后台线程中执行
+        thread = threading.Thread(target=run_multi_node_nccl_task, args=(test_id, payload), daemon=True)
+        thread.start()
+        
+        # 立即返回任务ID
+        return json_response(True, data={"testId": test_id}, message="多机NCCL测试已启动")
+    except Exception as exc:
+        logger.exception("启动多机NCCL测试失败: %s", exc)
         return json_response(False, message=str(exc), status=400)
+
+
+@app.route("/api/gpu-inspection/multi-node-nccl/<test_id>", methods=["GET"])
+def api_get_multi_node_nccl_status(test_id: str):
+    """查询多机NCCL测试状态"""
+    with multi_node_tests_lock:
+        test = multi_node_tests.get(test_id)
+        if not test:
+            return json_response(False, message="未找到测试任务", status=404)
+        
+        result_data = {
+            "testId": test_id,
+            "status": test["status"],
+            "createdAt": test["createdAt"],
+        }
+        
+        if test.get("startedAt"):
+            result_data["startedAt"] = test["startedAt"]
+        if test.get("completedAt"):
+            result_data["completedAt"] = test["completedAt"]
+        if test.get("result"):
+            result_data["result"] = test["result"]
+        if test.get("error"):
+            result_data["error"] = test["error"]
+        
+        return json_response(True, data=result_data)
 
 
 @app.route("/api/gpu-inspection/stop-job/<job_id>", methods=["POST"])

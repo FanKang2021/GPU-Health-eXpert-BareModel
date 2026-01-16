@@ -26,6 +26,7 @@ import {
   Terminal,
   Trash2,
   Upload,
+  X,
   XCircle,
 } from "lucide-react"
 import JSZip from "jszip"
@@ -581,6 +582,7 @@ export default function BareMetal() {
   })
   const [hostfileContent, setHostfileContent] = useState("")
   const [isRunningMultiNode, setIsRunningMultiNode] = useState(false)
+  const [multiNodeAbortController, setMultiNodeAbortController] = useState<AbortController | null>(null)
   const [multiNodeResult, setMultiNodeResult] = useState<{
     command?: string
     hosts?: string[]
@@ -1334,6 +1336,10 @@ export default function BareMetal() {
     setIsRunningMultiNode(true)
     setMultiNodeResult(null)
 
+    // 创建 AbortController 用于取消请求
+    const abortController = new AbortController()
+    setMultiNodeAbortController(abortController)
+
     try {
       const connection = {
         host: masterNode.host,
@@ -1366,34 +1372,100 @@ export default function BareMetal() {
         connection,
       }
 
-      const result = await apiRequest<{
-        command: string
-        hosts: string[]
-        nodeCount: number
-        exitCode: number
-        stdout: string
-        stderr: string
-        bandwidth: number | null
-        passed: boolean
-      }>("/api/gpu-inspection/multi-node-nccl", {
+      // 启动异步任务
+      const startResult = await apiRequest<{ testId: string }>("/api/gpu-inspection/multi-node-nccl", {
         method: "POST",
         body: JSON.stringify(payload),
+        signal: abortController.signal,
       })
 
-      setMultiNodeResult(result)
-      toast({
-        title: result.passed ? tr("多机测试完成", "Multi-node test completed") : tr("多机测试失败", "Multi-node test failed"),
-        description: result.bandwidth ? `${tr("带宽", "Bandwidth")}: ${result.bandwidth.toFixed(2)} GB/s` : undefined,
-        variant: result.passed ? "default" : "destructive",
-      })
+      const testId = startResult.testId
+      
+      // 轮询任务状态（在后台进行）
+      const pollStatus = async () => {
+        try {
+          while (!abortController.signal.aborted) {
+            try {
+              const statusResult = await apiRequest<{
+                testId: string
+                status: string
+                result?: {
+                  command: string
+                  hosts: string[]
+                  nodeCount: number
+                  exitCode: number
+                  stdout: string
+                  stderr: string
+                  bandwidth: number | null
+                  passed: boolean
+                }
+                error?: string
+              }>(`/api/gpu-inspection/multi-node-nccl/${testId}`, {
+                method: "GET",
+                signal: abortController.signal,
+              })
+
+              if (statusResult.status === "completed") {
+                if (statusResult.result) {
+                  setMultiNodeResult(statusResult.result)
+                  toast({
+                    title: statusResult.result.passed ? tr("多机测试完成", "Multi-node test completed") : tr("多机测试失败", "Multi-node test failed"),
+                    description: statusResult.result.bandwidth ? `${tr("带宽", "Bandwidth")}: ${statusResult.result.bandwidth.toFixed(2)} GB/s` : undefined,
+                    variant: statusResult.result.passed ? "default" : "destructive",
+                  })
+                }
+                break
+              } else if (statusResult.status === "failed") {
+                throw new Error(statusResult.error || tr("多机测试失败", "Multi-node test failed"))
+              } else if (statusResult.status === "running") {
+                // 继续等待
+                await new Promise(resolve => setTimeout(resolve, 2000)) // 每2秒轮询一次
+              } else {
+                // pending状态，继续等待
+                await new Promise(resolve => setTimeout(resolve, 1000)) // 每1秒轮询一次
+              }
+            } catch (error) {
+              if (error instanceof Error && error.name === 'AbortError') {
+                // 用户取消，退出轮询
+                break
+              }
+              // 其他错误，继续重试
+              await new Promise(resolve => setTimeout(resolve, 2000))
+            }
+          }
+        } finally {
+          setIsRunningMultiNode(false)
+          setMultiNodeAbortController(null)
+        }
+      }
+
+      // 开始轮询（不等待）
+      pollStatus()
     } catch (error) {
-      toast({
-        title: tr("多机测试失败", "Multi-node test failed"),
-        description: (error as Error).message,
-        variant: "destructive",
-      })
-    } finally {
+      // 如果是用户取消，不显示错误提示
+      if (error instanceof Error && error.name === 'AbortError') {
+        toast({
+          title: tr("测试已取消", "Test cancelled"),
+          description: tr("多机测试已被用户取消", "Multi-node test has been cancelled by user"),
+        })
+      } else {
+        toast({
+          title: tr("多机测试失败", "Multi-node test failed"),
+          description: (error as Error).message,
+          variant: "destructive",
+        })
+      }
       setIsRunningMultiNode(false)
+      setMultiNodeAbortController(null)
+    }
+  }
+
+  // 取消多机测试
+  const handleCancelMultiNodeTest = () => {
+    if (multiNodeAbortController) {
+      multiNodeAbortController.abort()
+      setIsRunningMultiNode(false)
+      setMultiNodeAbortController(null)
     }
   }
 
@@ -2572,24 +2644,37 @@ export default function BareMetal() {
             </div>
           </div>
 
-          <Button
-            onClick={handleRunMultiNodeTest}
-            disabled={isRunningMultiNode || selectedNodes.length === 0}
-            className="w-full mt-6 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 disabled:opacity-50"
-            size="lg"
-          >
-            {isRunningMultiNode ? (
-              <>
-                <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                {tr("多机测试运行中...", "Multi-node test running...")}
-              </>
-            ) : (
-              <>
-                <Play className="w-5 h-5 mr-2" />
-                {tr("运行多机NCCL测试", "Run Multi-Node NCCL Test")}
-              </>
+          <div className="flex gap-3 mt-6">
+            <Button
+              onClick={handleRunMultiNodeTest}
+              disabled={isRunningMultiNode || selectedNodes.length === 0}
+              className="flex-1 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 disabled:opacity-50"
+              size="lg"
+            >
+              {isRunningMultiNode ? (
+                <>
+                  <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                  {tr("多机测试运行中...", "Multi-node test running...")}
+                </>
+              ) : (
+                <>
+                  <Play className="w-5 h-5 mr-2" />
+                  {tr("运行多机NCCL测试", "Run Multi-Node NCCL Test")}
+                </>
+              )}
+            </Button>
+            {isRunningMultiNode && (
+              <Button
+                onClick={handleCancelMultiNodeTest}
+                variant="destructive"
+                size="lg"
+                className="px-6"
+              >
+                <X className="w-5 h-5 mr-2" />
+                {tr("取消", "Cancel")}
+              </Button>
             )}
-          </Button>
+          </div>
         </Card>
 
         {/* 多机测试执行结果区域 */}
