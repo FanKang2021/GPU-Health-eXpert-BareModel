@@ -5,7 +5,7 @@ GHX Bare-Metal Orchestrator
 通过SSH在裸金属节点上运行GPU健康检查
 1. 支持SSH连接测试与基础命令检查
 2. 通过后台Job执行nvbandwidth/p2p/nccl/dcgm/ib检查
-3. 将nccl-tests（预编译版本，本地解压后上传目录）、nvbandwidth、p2pBandwidthLatencyTest上传到目标主机的/tmp/ghx目录执行
+3. 将nvbandwidth、p2pBandwidthLatencyTest上传到目标主机的/tmp/ghx目录执行；根据CUDA版本（12.x或13.x）自动选择对应的预编译nccl-tests包（nccl-tests-12.tgz或nccl-tests-13.tgz）上传并解压到/tmp/ghx目录
 """
 from __future__ import annotations
 
@@ -35,11 +35,14 @@ from flask_cors import CORS
 # -----------------------------------------------------------------------------
 
 BASE_DIR = Path(__file__).resolve().parent
+# 支持通过环境变量指定资产目录（Docker 容器内使用）
+ASSET_DIR = Path(os.getenv("GHX_ASSET_DIR", str(BASE_DIR)))
 ASSETS = {
-    "nvbandwidth": BASE_DIR / "nvbandwidth",
-    "p2p": BASE_DIR / "p2pBandwidthLatencyTest",
-    "nccl_tests": BASE_DIR / "nccl-tests.tgz",
-    "ib_check": BASE_DIR / "assets" / "ib_health_check.sh",
+    "nvbandwidth": ASSET_DIR / "nvbandwidth",
+    "p2p": ASSET_DIR / "p2pBandwidthLatencyTest",
+    "nccl_tests_12": ASSET_DIR / "nccl-tests-12.tgz",
+    "nccl_tests_13": ASSET_DIR / "nccl-tests-13.tgz",
+    "ib_check": ASSET_DIR / "ib_health_check.sh",
 }
 
 for name, path in ASSETS.items():
@@ -63,8 +66,16 @@ BENCHMARK_FILE = os.getenv("GPU_BENCHMARK_FILE", str(BASE_DIR / "config" / "gpu-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("ghx-baremetal")
+
+# 记录资产目录配置
+logger.info("资产目录配置: BASE_DIR=%s, ASSET_DIR=%s (GHX_ASSET_DIR=%s)", 
+           BASE_DIR, ASSET_DIR, os.getenv("GHX_ASSET_DIR", "未设置"))
+for name, path in ASSETS.items():
+    if path.exists():
+        logger.debug("Asset %s found at %s", name, path)
 
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
@@ -633,44 +644,66 @@ class RemoteNodeRunner:
             if gpu_count == 0:
                 raise RuntimeError("未检测到GPU，无法运行NCCL测试")
             
-            # 上传压缩包到远程并解压
-            nccl_tests_tgz = ASSETS["nccl_tests"]
-            if not nccl_tests_tgz.exists():
-                raise FileNotFoundError(f"nccl-tests.tgz 不存在: {nccl_tests_tgz}")
+            # 检测 CUDA 版本
+            self.log("检测 CUDA 版本")
+            nvcc_res = self.session.run("/usr/local/cuda/bin/nvcc --version 2>/dev/null || true")
+            cuda_version = extract_cuda_version(nvcc_res.stdout)
+            if not cuda_version:
+                raise RuntimeError("无法检测 CUDA 版本")
             
-            remote_tgz = f"{self.remote_dir}/nccl-tests.tgz"
-            remote_nccl_dir = f"{self.remote_dir}/nccl-tests"
+            self.log(f"检测到 CUDA 版本: {cuda_version}")
+            
+            # 根据 CUDA 版本选择对应的预编译包
+            if cuda_version.startswith("12."):
+                nccl_tests_tgz = ASSETS["nccl_tests_12"]
+                asset_name = "nccl-tests-12.tgz"
+            elif cuda_version.startswith("13."):
+                nccl_tests_tgz = ASSETS["nccl_tests_13"]
+                asset_name = "nccl-tests-13.tgz"
+            else:
+                raise RuntimeError(f"不支持的 CUDA 版本: {cuda_version}，仅支持 12.x 和 13.x")
+            
+            if not nccl_tests_tgz.exists():
+                raise FileNotFoundError(f"{asset_name} 不存在: {nccl_tests_tgz}")
+            
+            remote_nccl_tests_tgz = f"{self.remote_dir}/{asset_name}"
+            remote_nccl_tests_dir = f"{self.remote_dir}/nccl-tests"
             
             # 上传压缩包
-            self.log("上传 nccl-tests.tgz 到远程节点")
-            self.session.upload(nccl_tests_tgz, remote_tgz)
+            self.log(f"上传 {asset_name} 到远程节点")
+            self.session.upload(nccl_tests_tgz, remote_nccl_tests_tgz)
             
-            # 远程解压
-            self.log("在远程节点解压 nccl-tests.tgz")
+            # 解压预编译包
+            self.log("在远程节点解压 nccl-tests")
             extract_script = f"""
-rm -rf {remote_nccl_dir}
-tar -xzf {remote_tgz} -C {self.remote_dir}
-rm -f {remote_tgz}
-"""
-            extract_result = self.session.run(extract_script, timeout=120)
-            if extract_result.exit_code != 0:
-                raise RuntimeError(f"解压失败: {extract_result.stderr}")
-            
-            # 运行 NCCL 测试
-            script = f"""
-# 确保可执行文件有执行权限
-if [ -f {remote_nccl_dir}/build/all_reduce_perf ]; then
-    chmod +x {remote_nccl_dir}/build/all_reduce_perf
-fi
+set -e
+# 清理旧目录
+rm -rf {remote_nccl_tests_dir}
+
+# 解压 nccl-tests
+echo "解压 {asset_name}..."
+tar -xzf {remote_nccl_tests_tgz} -C {self.remote_dir}
+rm -f {remote_nccl_tests_tgz}
+
 # 验证文件是否存在
-if [ ! -f {remote_nccl_dir}/build/all_reduce_perf ]; then
-    echo "错误: {remote_nccl_dir}/build/all_reduce_perf 不存在"
+if [ ! -f {remote_nccl_tests_dir}/build/all_reduce_perf ]; then
+    echo "错误: {remote_nccl_tests_dir}/build/all_reduce_perf 不存在"
     exit 1
 fi
-# 运行 NCCL 测试
-{remote_nccl_dir}/build/all_reduce_perf -b 1024 -e 1G -f 2 -g {gpu_count}
+
+chmod +x {remote_nccl_tests_dir}/build/all_reduce_perf
+echo "解压完成"
 """
-            result = self.session.run(script, timeout=600, require_root=True)
+            extract_result = self.session.run(extract_script, timeout=120, require_root=True)
+            if extract_result.exit_code != 0:
+                raise RuntimeError(f"解压失败: {extract_result.stderr or extract_result.stdout}")
+            
+            # 运行 NCCL 测试
+            self.log("运行 NCCL 测试")
+            test_script = f"""
+{remote_nccl_tests_dir}/build/all_reduce_perf -b 1024 -e 1G -f 2 -g {gpu_count}
+"""
+            result = self.session.run(test_script, timeout=600, require_root=True)
             if result.exit_code != 0:
                 raise RuntimeError(result.stderr or "nccl-tests 执行失败")
             value = parse_nccl(result.stdout)
@@ -942,18 +975,54 @@ def extract_cuda_version(nvcc_output: str) -> str:
     match = re.search(r'V(\d+\.\d+)', nvcc_output)
     if match:
         return match.group(1)
+    logger.warning("extract_cuda_version: 未能从输出中提取CUDA版本")
     return ""
 
 
 def extract_nccl_version(apt_output: str, package_name: str) -> str:
     """从 apt list 输出中提取 NCCL 包版本"""
     import re
-    for line in apt_output.splitlines():
-        if package_name in line and "[installed]" in line:
-            # 格式: libnccl2/unknown,now 2.28.9-1+cuda13.0 amd64 [installed]
-            match = re.search(r'(\d+\.\d+\.\d+)-\d+\+cuda(\d+\.\d+)', line)
+    lines = apt_output.splitlines()
+    logger.debug("extract_nccl_version: 查找包 %s, 输入行数=%d", package_name, len(lines))
+    
+    for idx, line in enumerate(lines):
+        # 跳过警告行
+        line_stripped = line.strip()
+        if line_stripped.startswith("WARNING:"):
+            continue
+        
+        # 检查包名和 [installed] 标记
+        has_package = package_name in line_stripped
+        # 使用关键字匹配方法：检查 "installed" 是否在方括号之间
+        has_installed = ("installed" in line_stripped.lower() and 
+                        "[" in line_stripped and "]" in line_stripped)
+        
+        logger.debug("extract_nccl_version: 行[%d]: package_name(%s) in line=%s, '[installed]' in line=%s", 
+                   idx, package_name, has_package, has_installed)
+        
+        if has_package and has_installed:
+            # 格式: libnccl2/unknown,now 2.26.2-1+cuda12.8 amd64 [installed,upgradable to: 2.27.3-1+cuda12.9]
+            # 只匹配 [installed] 之前的内容，避免匹配到 upgradable to 后的版本
+            installed_part = line_stripped.split("[installed]")[0].strip()
+            # 格式: libnccl2/unknown,now 2.26.2-1+cuda12.8 amd64
+            # 匹配版本号格式: 数字.数字.数字-数字+cuda数字.数字
+            import re
+            match = re.search(r'(\d+\.\d+\.\d+)-\d+\+cuda(\d+\.\d+)', installed_part)
             if match:
-                return match.group(2)  # 返回 cuda 版本
+                cuda_version = match.group(2)
+                logger.debug("extract_nccl_version: 提取到CUDA版本: %s (完整匹配: %s)", cuda_version, match.group(0))
+                return cuda_version
+            else:
+                # 尝试更宽松的匹配
+                match2 = re.search(r'cuda(\d+\.\d+)', installed_part)
+                if match2:
+                    cuda_version = match2.group(1)
+                    logger.debug("extract_nccl_version: 通过宽松模式提取到CUDA版本: %s", cuda_version)
+                    return cuda_version
+                else:
+                    logger.warning("extract_nccl_version: 行匹配但版本提取失败: %s", installed_part)
+    
+    logger.warning("extract_nccl_version: 未找到包 %s 的已安装版本", package_name)
     return ""
 
 
@@ -973,9 +1042,20 @@ def api_check_commands():
             for cmd in commands:
                 # 检查是否是包名（libnccl2, libnccl-dev）
                 if cmd in ("libnccl2", "libnccl-dev"):
-                    check_cmd = f"apt list --installed 2>/dev/null | grep -E '^{cmd}/' | grep '\\[installed\\]'"
-                    res = session.run(check_cmd)
-                    results[cmd] = bool(res.stdout.strip())
+                    # 使用更简单的命令，直接检查包名和 [installed] 标记
+                    # apt list 需要 root 权限
+                    check_cmd = f"apt list --installed 2>/dev/null | grep -E '^{cmd}/'"
+                    res = session.run(check_cmd, require_root=True)
+                    output = res.stdout.strip()
+                    # 检查输出中是否包含 [installed]
+                    # 使用关键字匹配方法：检查 "installed" 是否在方括号之间
+                    has_installed = False
+                    if output:
+                        has_installed = ("installed" in output.lower() and 
+                                        "[" in output and "]" in output and
+                                        output.find("[") < output.find("installed", output.find("[")) < output.find("]", output.find("[")))
+                    logger.debug("包检测 %s: 输出长度=%d, 包含[installed]=%s", cmd, len(output), has_installed)
+                    results[cmd] = has_installed
                 # 检查 nvidia_peermem 内核模块是否加载
                 elif cmd == "nvidia_peermem":
                     check_cmd = "lsmod | grep nvidia_peermem"
@@ -1063,22 +1143,27 @@ def api_check_commands():
             
             # 获取版本信息用于比对
             nvcc_res = session.run("/usr/local/cuda/bin/nvcc --version 2>/dev/null || true")
-            apt_res = session.run("apt list --installed 2>/dev/null | grep -E '^libnccl' || true")
+            # apt list 需要 root 权限
+            apt_res = session.run("apt list --installed 2>/dev/null | grep -E '^libnccl' || true", require_root=True)
             
             nvcc_version = extract_cuda_version(nvcc_res.stdout)
             libnccl2_version = extract_nccl_version(apt_res.stdout, "libnccl2")
             libnccl_dev_version = extract_nccl_version(apt_res.stdout, "libnccl-dev")
             
+            version_match = bool(
+                nvcc_version and 
+                libnccl2_version and 
+                libnccl_dev_version and
+                nvcc_version == libnccl2_version == libnccl_dev_version
+            )
+            logger.debug("版本检查: nvcc=%s, libnccl2=%s, libnccl-dev=%s, 匹配=%s", 
+                       nvcc_version, libnccl2_version, libnccl_dev_version, version_match)
+            
             versions = {
                 "nvcc": nvcc_version,
                 "libnccl2": libnccl2_version,
                 "libncclDev": libnccl_dev_version,
-                "versionMatch": bool(
-                    nvcc_version and 
-                    libnccl2_version and 
-                    libnccl_dev_version and
-                    nvcc_version == libnccl2_version == libnccl_dev_version
-                )
+                "versionMatch": version_match
             }
         
         return json_response(True, data={"commands": results, "versions": versions}, message="命令检查完成")
@@ -1367,19 +1452,56 @@ def api_multi_node_nccl():
             # 检查nccl-tests是否存在，不存在则上传并解压
             check_res = session.run("[ -f /tmp/ghx/nccl-tests/build/all_reduce_perf ] && echo OK || echo MISSING")
             if check_res.stdout.strip() != "OK":
-                logger.info("nccl-tests 不存在，开始上传并解压")
-                nccl_tests_tgz = ASSETS["nccl_tests"]
+                logger.info("nccl-tests 不存在，开始检测 CUDA 版本并上传对应预编译包")
+                
+                # 检测 CUDA 版本
+                nvcc_res = session.run("/usr/local/cuda/bin/nvcc --version 2>/dev/null || true")
+                cuda_version = extract_cuda_version(nvcc_res.stdout)
+                if not cuda_version:
+                    return json_response(False, message="无法检测 CUDA 版本", status=400)
+                
+                logger.info("检测到 CUDA 版本: %s", cuda_version)
+                
+                # 根据 CUDA 版本选择对应的预编译包
+                if cuda_version.startswith("12."):
+                    nccl_tests_tgz = ASSETS["nccl_tests_12"]
+                    asset_name = "nccl-tests-12.tgz"
+                elif cuda_version.startswith("13."):
+                    nccl_tests_tgz = ASSETS["nccl_tests_13"]
+                    asset_name = "nccl-tests-13.tgz"
+                else:
+                    return json_response(False, message=f"不支持的 CUDA 版本: {cuda_version}，仅支持 12.x 和 13.x", status=400)
+                
                 if not nccl_tests_tgz.exists():
-                    return json_response(False, message="nccl-tests.tgz 文件不存在", status=400)
+                    return json_response(False, message=f"{asset_name} 文件不存在", status=400)
                 
                 # 上传压缩包
-                remote_tgz = "/tmp/ghx/nccl-tests.tgz"
-                session.upload(nccl_tests_tgz, remote_tgz)
+                remote_nccl_tests_tgz = f"/tmp/ghx/{asset_name}"
+                session.upload(nccl_tests_tgz, remote_nccl_tests_tgz)
                 
-                # 解压
-                extract_result = session.run(f"tar -xzf {remote_tgz} -C /tmp/ghx && rm -f {remote_tgz}")
+                # 解压预编译包
+                extract_script = f"""
+set -e
+# 清理旧目录
+rm -rf /tmp/ghx/nccl-tests
+
+# 解压 nccl-tests
+echo "解压 {asset_name}..."
+tar -xzf {remote_nccl_tests_tgz} -C /tmp/ghx
+rm -f {remote_nccl_tests_tgz}
+
+# 验证文件是否存在
+if [ ! -f /tmp/ghx/nccl-tests/build/all_reduce_perf ]; then
+    echo "错误: /tmp/ghx/nccl-tests/build/all_reduce_perf 不存在"
+    exit 1
+fi
+
+chmod +x /tmp/ghx/nccl-tests/build/all_reduce_perf
+echo "解压完成"
+"""
+                extract_result = session.run(extract_script, timeout=120, require_root=True)
                 if extract_result.exit_code != 0:
-                    return json_response(False, message=f"解压 nccl-tests 失败: {extract_result.stderr}", status=400)
+                    return json_response(False, message=f"解压失败: {extract_result.stderr or extract_result.stdout}", status=400)
                 
                 # 再次检查
                 check_res = session.run("[ -f /tmp/ghx/nccl-tests/build/all_reduce_perf ] && echo OK || echo MISSING")

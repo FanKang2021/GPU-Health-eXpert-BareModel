@@ -23,7 +23,7 @@
 ## 核心特性
 
 - 通过 SSH 直接接入裸金属主机，类似 Ansible 的分发执行方式。
-- 自动上传 `nvbandwidth`、`p2pBandwidthLatencyTest`、`nccl-tests.tgz`（预编译版本）等依赖，nccl-tests 将解压到 `/opt/nccl-tests` 直接使用。
+- 自动上传 `nvbandwidth`、`p2pBandwidthLatencyTest`、`nccl.tgz`、`nccl-tests.tgz` 等依赖，在目标节点 `/tmp/ghx` 目录下解压并编译后使用。
 - 支持多节点批量任务、实时进度查看、日志下载。
 - 提供 GPU 基准值判定，自动给出通过/失败结论。
 - 纯前后端解耦，前端通过 REST API 调用后端，可按需扩展。
@@ -47,7 +47,10 @@
 
 - `nvbandwidth`
 - `p2pBandwidthLatencyTest`
-- `nccl-tests.tgz`（预编译版本，将自动解压到 `/opt/nccl-tests`）
+- `nccl.tgz`（NCCL 源码压缩包，将在目标节点编译）
+- `nccl-tests.tgz`（NCCL Tests 源码压缩包，将在目标节点编译）
+
+所有文件将上传到目标节点的 `/tmp/ghx` 目录，`nccl` 和 `nccl-tests` 会在目标节点解压并编译（支持多节点并发编译以节省时间）。
 
 若放在其他目录，可通过环境变量 `GHX_ASSET_DIR` 指定并挂载到容器或运行目录。
 

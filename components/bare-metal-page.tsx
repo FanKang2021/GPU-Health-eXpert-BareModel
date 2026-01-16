@@ -686,9 +686,9 @@ export default function BareMetal() {
     // 单节点测试
     if (entries.length === 1) {
       const entry = entries[0]
-      try {
-        setIsTestingSSH(true)
-        setSshStatus("testing")
+    try {
+    setIsTestingSSH(true)
+    setSshStatus("testing")
         const connection = {
           host: entry.host,
           port: Number(entry.port) || 22,
@@ -699,26 +699,26 @@ export default function BareMetal() {
           },
           sudoPassword: sshConfig.sudoPassword || (authMethod === "password" ? sshConfig.password : undefined),
         }
-        const data = await apiRequest<SSHTestResult>("/api/ssh/test-connection", {
-          method: "POST",
-          body: JSON.stringify({ connection }),
-        })
-        setSshStatus("success")
-        setLastTestDetails(data)
-        toast({
-          title: tr("SSH连接成功", "SSH connection succeeded"),
+      const data = await apiRequest<SSHTestResult>("/api/ssh/test-connection", {
+        method: "POST",
+        body: JSON.stringify({ connection }),
+      })
+      setSshStatus("success")
+      setLastTestDetails(data)
+      toast({
+        title: tr("SSH连接成功", "SSH connection succeeded"),
           description: `${tr("主机", "Host")}: ${data.hostname || entry.host}`,
-        })
-      } catch (error) {
-        setSshStatus("error")
-        toast({
-          title: tr("SSH连接失败", "SSH connection failed"),
-          description: (error as Error).message,
-          variant: "destructive",
-        })
-      } finally {
-        setIsTestingSSH(false)
-      }
+      })
+    } catch (error) {
+      setSshStatus("error")
+      toast({
+        title: tr("SSH连接失败", "SSH connection failed"),
+        description: (error as Error).message,
+        variant: "destructive",
+      })
+    } finally {
+    setIsTestingSSH(false)
+    }
       return
     }
 
@@ -1694,19 +1694,19 @@ export default function BareMetal() {
               {sshStatus === "success" && Object.keys(batchTestResults).length === 0 && lastTestDetails && (
                 <div className="space-y-3 rounded-lg border border-green-500/30 bg-green-500/5 p-3 text-sm text-green-200">
                   <div className="flex items-center gap-2">
-                    <CheckCircle2 className="w-4 h-4" />
+                  <CheckCircle2 className="w-4 h-4" />
                     <span>{tr("SSH连接成功", "SSH connection succeeded")}</span>
                   </div>
-                  <div>
-                    {tr("主机名：", "Hostname: ")}
-                    {lastTestDetails.hostname || sshConfig.host}
-                  </div>
-                  <div className="text-xs text-green-100/70">
-                    {tr("GPU：", "GPU: ")}
-                    {lastTestDetails.gpuModel && lastTestDetails.gpuCount
-                      ? `${lastTestDetails.gpuModel} × ${lastTestDetails.gpuCount}`
-                      : tr("未知", "Unknown")}
-                  </div>
+                      <div>
+                        {tr("主机名：", "Hostname: ")}
+                        {lastTestDetails.hostname || sshConfig.host}
+                      </div>
+                      <div className="text-xs text-green-100/70">
+                        {tr("GPU：", "GPU: ")}
+                        {lastTestDetails.gpuModel && lastTestDetails.gpuCount
+                          ? `${lastTestDetails.gpuModel} × ${lastTestDetails.gpuCount}`
+                          : tr("未知", "Unknown")}
+                      </div>
                 </div>
               )}
               {sshStatus === "error" && Object.keys(batchTestResults).length === 0 && (
@@ -1770,7 +1770,7 @@ export default function BareMetal() {
 
             <p className="text-xs text-slate-500 mt-4 text-center">
               {tr("在下方「待检查节点」列表中点击「检测」按钮进行命令检测", "Click the 'Check' button in the 'Pending Nodes' list below to run command detection")}
-            </p>
+              </p>
           </Card>
         </div>
 
