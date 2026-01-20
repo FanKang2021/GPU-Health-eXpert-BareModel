@@ -69,7 +69,6 @@ interface CommandCheckResult {
 
 interface SelectedNode {
   id: string
-  alias: string
   host: string
   port: string
   username: string
@@ -94,8 +93,8 @@ interface JobMetric {
 
 interface JobNodeStatus {
   nodeId: string
-  alias: string
   host: string
+  port?: number
   status: string
   gpuType?: string
   results?: Record<string, JobMetric>
@@ -112,9 +111,9 @@ interface JobDetail {
 interface JobNodeResult {
   id: string
   jobId: string
-  alias: string
   hostname: string
   host: string
+  port?: number
   gpuType?: string
   nvbandwidth?: JobMetric
   p2p?: JobMetric
@@ -179,8 +178,10 @@ const extractGpuModel = (summary?: SSHTestResult) => {
 }
 
 const formatJobName = (node: SelectedNode) => {
-  const gpu = extractGpuModel(node.summary) || sanitizeToken(node.alias, "node")
-  const hostToken = sanitizeToken(node.host, "host")
+  const gpu = extractGpuModel(node.summary) || "node"
+  // 包含端口号以区分同一IP的不同节点
+  const hostWithPort = node.port && node.port !== "22" ? `${node.host}:${node.port}` : node.host
+  const hostToken = sanitizeToken(hostWithPort, "host")
   const now = new Date()
   const pad = (num: number) => num.toString().padStart(2, "0")
   const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}${pad(now.getHours())}${pad(
@@ -478,22 +479,28 @@ const renderStatusBadge = (status: string, lang: "zh" | "en" = "zh") => {
 }
 
 const flattenJobNodes = (job: JobDetail): JobNodeResult[] => {
-  return (job.nodes || []).map((node) => ({
-    id: `${job.jobId}-${node.nodeId}`,
-    jobId: job.jobId,
-    alias: node.alias || node.host,
-    hostname: node.alias || node.host,
-    host: node.host,
-    gpuType: node.gpuType,
-    nvbandwidth: node.results?.nvbandwidth,
-    p2p: node.results?.p2p,
-    nccl: node.results?.nccl,
-    dcgm: node.results?.dcgm,
-    ib: node.results?.ib,
-    status: node.status,
-    executionLog: node.executionLog,
-    completedAt: node.completedAt,
-  }))
+  return (job.nodes || []).map((node) => {
+    // 如果host不包含端口，且port存在，则添加端口号
+    const hostDisplay = node.port && node.port !== 22 && !node.host.includes(':') 
+      ? `${node.host}:${node.port}` 
+      : node.host
+    return {
+      id: `${job.jobId}-${node.nodeId}`,
+      jobId: job.jobId,
+      hostname: hostDisplay,
+      host: hostDisplay,
+      port: node.port,
+      gpuType: node.gpuType,
+      nvbandwidth: node.results?.nvbandwidth,
+      p2p: node.results?.p2p,
+      nccl: node.results?.nccl,
+      dcgm: node.results?.dcgm,
+      ib: node.results?.ib,
+      status: node.status,
+      executionLog: node.executionLog,
+      completedAt: node.completedAt,
+    }
+  })
 }
 
 export default function BareMetal() {
@@ -833,9 +840,10 @@ export default function BareMetal() {
         )
       )
 
+      const nodeDisplay = node.port && node.port !== "22" ? `${node.host}:${node.port}` : node.host
       toast({
         title: tr("命令检测完成", "Command check completed"),
-        description: node.alias,
+        description: nodeDisplay,
       })
     } catch (error) {
       setSelectedNodes((prev) =>
@@ -923,7 +931,6 @@ export default function BareMetal() {
         }
         newNodes.push({
           id: generateId(),
-          alias: host,
           host,
           port,
           username: sshConfig.username,
@@ -967,7 +974,6 @@ export default function BareMetal() {
       }
       const newNode: SelectedNode = {
         id: generateId(),
-        alias: entry.host,
         host: entry.host,
         port: entry.port,
         username: sshConfig.username,
@@ -979,9 +985,10 @@ export default function BareMetal() {
         internalIp: lastTestDetails?.internalIp,  // 保存内网IP
       }
       setSelectedNodes((prev) => [newNode, ...prev])
+      const nodeDisplay = newNode.port && newNode.port !== "22" ? `${newNode.host}:${newNode.port}` : newNode.host
       toast({
         title: tr("节点已加入待检查列表", "Node added to pending list"),
-        description: newNode.alias,
+        description: nodeDisplay,
       })
     } catch (error) {
       toast({
@@ -1079,7 +1086,7 @@ export default function BareMetal() {
       })
       return
     }
-    const filename = `${result.alias || result.hostname}-log-${formatLogTimestamp(result.completedAt)}.txt`
+    const filename = `${result.hostname || result.host}-log-${formatLogTimestamp(result.completedAt)}.txt`
     downloadTextFile(filename, result.executionLog)
   }
 
@@ -1093,9 +1100,9 @@ export default function BareMetal() {
     try {
       const zip = new JSZip()
       selected.forEach((item, index) => {
-        const filename = `${item.alias || item.hostname || "node"}-${index + 1}-${formatLogTimestamp(item.completedAt)}.txt`
+        const filename = `${item.hostname || item.host || "node"}-${index + 1}-${formatLogTimestamp(item.completedAt)}.txt`
         const header = [
-          `${tr("节点", "Node")}: ${item.alias || item.hostname} (${item.host})`,
+          `${tr("节点", "Node")}: ${item.hostname || item.host} (${item.host})`,
           `${tr("完成时间", "Completed at")}: ${item.completedAt ? new Date(item.completedAt).toLocaleString(language === "zh" ? "zh-CN" : "en-US") : "--"}`,
           "",
         ].join("\n")
@@ -1143,11 +1150,11 @@ export default function BareMetal() {
           node.authMethod === "password"
             ? { type: "password", value: node.password || "" }
             : { type: "privateKey", value: node.privateKey || "" }
+        const nodeDisplay = node.port && node.port !== "22" ? `${node.host}:${node.port}` : node.host
         if (!auth.value) {
-          throw new Error(tr("节点", "Node") + ` ${node.alias} ` + tr("缺少认证信息", "lacks authentication info"))
+          throw new Error(tr("节点", "Node") + ` ${nodeDisplay} ` + tr("缺少认证信息", "lacks authentication info"))
         }
         return {
-          alias: node.alias,
           host: node.host,
           port: Number(node.port) || 22,
           username: node.username,
@@ -1171,8 +1178,8 @@ export default function BareMetal() {
         status: "pending",
         nodes: nodesToRun.map((node) => ({
           nodeId: node.id,
-          alias: node.alias,
           host: node.host,
+          port: Number(node.port) || 22,
           status: "pending",
         })),
       })
@@ -1906,7 +1913,6 @@ export default function BareMetal() {
                           className="border-slate-600"
                         />
                       </th>
-                      <th className="py-3 px-4 text-left">{tr("别名", "Alias")}</th>
                       <th className="py-3 px-4 text-left">{tr("地址", "Address")}</th>
                       <th className="py-3 px-4 text-left">{tr("内网IP", "Internal IP")}</th>
                       <th className="py-3 px-4 text-left">{tr("用户名", "Username")}</th>
@@ -1925,9 +1931,8 @@ export default function BareMetal() {
                             className="border-slate-600"
                           />
                         </td>
-                        <td className="py-3 px-4 text-white">{node.alias}</td>
                         <td className="py-3 px-4 text-slate-300">
-                          {node.host}:{node.port}
+                          {node.port && node.port !== "22" ? `${node.host}:${node.port}` : node.host}
                         </td>
                         <td className="py-3 px-4">
                           {node.internalIp || node.summary?.internalIp ? (
@@ -2172,19 +2177,25 @@ export default function BareMetal() {
               </div>
 
               <div className="mt-4 grid md:grid-cols-2 gap-3">
-                {currentJob.nodes?.map((node) => (
-                  <div key={node.nodeId} className="rounded border border-slate-800 p-3 bg-slate-900/50">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-white font-medium">{node.alias || node.host}</p>
-                        <p className="text-xs text-slate-500">
-                          GPU: {node.gpuType || tr("未知", "Unknown")}
-                        </p>
+                {currentJob.nodes?.map((node) => {
+                  // 显示节点地址时包含端口号
+                  const hostDisplay = node.port && node.port !== 22 && !node.host.includes(':')
+                    ? `${node.host}:${node.port}`
+                    : node.host
+                  return (
+                    <div key={node.nodeId} className="rounded border border-slate-800 p-3 bg-slate-900/50">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-white font-medium">{hostDisplay}</p>
+                          <p className="text-xs text-slate-500">
+                            <span>GPU: {node.gpuType || tr("未知", "Unknown")}</span>
+                          </p>
+                        </div>
+                        {renderStatusBadge(node.status, language)}
                       </div>
-                      {renderStatusBadge(node.status, language)}
                     </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             </div>
           )}
@@ -2289,8 +2300,7 @@ export default function BareMetal() {
                           className="border-slate-600"
                         />
                       </th>
-                      <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("节点别名", "Alias")}</th>
-                      <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("节点地址", "Address")}</th>
+                      <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("节点地址", "Node Address")}</th>
                   <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("GPU类型", "GPU Type")}</th>
                   <th className="text-left py-3 px-4 text-slate-300 font-medium">nvBandwidthTest</th>
                   <th className="text-left py-3 px-4 text-slate-300 font-medium">p2pBandwidthLatencyTest</th>
@@ -2322,8 +2332,7 @@ export default function BareMetal() {
                             className="border-slate-600"
                           />
                       </td>
-                        <td className="py-3 px-4 text-white font-medium">{result.alias || result.hostname}</td>
-                        <td className="py-3 px-4 text-slate-300 text-xs">{result.host}</td>
+                        <td className="py-3 px-4 text-white font-medium">{result.hostname || result.host}</td>
                         <td className="py-3 px-4 text-white">{result.gpuType || "Unknown"}</td>
                         <td className="py-3 px-4">{renderMetric(result.nvbandwidth, "GB/s", language)}</td>
                         <td className="py-3 px-4">{renderMetric(result.p2p, "GB/s", language)}</td>
@@ -2349,7 +2358,7 @@ export default function BareMetal() {
                               setLogViewer({
                                 open: true,
                                 content: result.executionLog || "",
-                              title: `${result.alias || result.hostname} ${tr("日志", "Logs")}`,
+                              title: `${result.hostname || result.host} ${tr("日志", "Logs")}`,
                               })
                             }
                         >

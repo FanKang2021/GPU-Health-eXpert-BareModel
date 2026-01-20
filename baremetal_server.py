@@ -426,7 +426,10 @@ class RemoteNodeRunner:
         timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         entry = f"{timestamp} - {message}"
         self.logs.append(entry)
-        logger.info("[%s] %s", self.node_meta["alias"], message)
+        host = self.node_meta.get("host", "unknown")
+        port = self.node_meta.get("port", 22)
+        node_display = f"{host}:{port}" if port != 22 else host
+        logger.info("[%s] %s", node_display, message)
 
     def benchmark_for(self, metric: str) -> Optional[float]:
         gpu_type = self.node_meta.get("gpuType")
@@ -842,7 +845,10 @@ def run_node_check(node: Dict[str, Any], tests: List[str], dcgm_level: str, canc
         node["status"] = node_result["overallStatus"]
         node["completedAt"] = utc_now()
     except Exception as exc:  # pylint: disable=broad-except
-        logger.exception("节点 %s 执行失败: %s", node["alias"], exc)
+        host = node.get("host", "unknown")
+        port = node.get("port", 22)
+        node_display = f"{host}:{port}" if port != 22 else host
+        logger.exception("节点 %s 执行失败: %s", node_display, exc)
         node["status"] = "failed"
         node["executionLog"] = "\n".join(runner.logs + [f"异常: {exc}"])
     finally:
@@ -900,7 +906,10 @@ def run_job(job_id: str):
                     future.result()
                 except Exception as exc:  # pylint: disable=broad-except
                     node = future_to_node[future]
-                    logger.exception("节点 %s 执行异常: %s", node.get("alias"), exc)
+                    host = node.get("host", "unknown")
+                    port = node.get("port", 22)
+                    node_display = f"{host}:{port}" if port != 22 else host
+                    logger.exception("节点 %s 执行异常: %s", node_display, exc)
                     if node["status"] == "running":
                         node["status"] = "failed"
                         node["executionLog"] = f"执行异常: {exc}"
@@ -1238,7 +1247,6 @@ def api_create_job():
                 raise ValueError(f"节点 {node_payload.get('host')} 缺少有效的认证信息")
             node_entry = {
                 "nodeId": uuid.uuid4().hex,
-                "alias": node_payload.get("alias") or node_payload["host"],
                 "host": node_payload["host"],
                 "port": node_payload.get("port", 22),
                 "username": node_payload["username"],
