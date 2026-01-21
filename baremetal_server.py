@@ -1380,7 +1380,56 @@ def api_setup_ssh_trust():
                         r["message"] = f"分发公钥失败: {exc}"
                         break
         
+        # 第三步：从第一个节点测试到其他节点的SSH连接
+        logger.info("开始从第一个节点测试到其他节点的SSH连接")
+        first_node_info = node_info[0]
+        test_failures = []
+        
+        for info in node_info[1:]:  # 从第二个节点开始测试
+            display_name = info["display_name"]
+            target_internal_ip = info["internal_ip"]
+            try:
+                with SSHSession(first_node_info["connection"]) as session:
+                    # 从第一个节点SSH连接到目标节点，测试连接是否成功
+                    test_cmd = f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes {target_internal_ip} 'echo SSH_TEST_OK' 2>&1"
+                    test_result = session.run(test_cmd, timeout=15, require_root=True)
+                    
+                    if test_result.exit_code == 0 and "SSH_TEST_OK" in test_result.stdout:
+                        logger.info("从第一个节点到节点 %s (内网IP: %s) SSH连接测试成功", display_name, target_internal_ip)
+                    else:
+                        error_msg = test_result.stderr or test_result.stdout or "SSH连接测试失败"
+                        logger.error("从第一个节点到节点 %s (内网IP: %s) SSH连接测试失败: %s", display_name, target_internal_ip, error_msg)
+                        test_failures.append((display_name, target_internal_ip, error_msg))
+                        # 更新结果状态为警告
+                        for r in results:
+                            if r["host"] == display_name:
+                                r["status"] = "warning"
+                                r["message"] = f"SSH互信配置完成，但连接测试失败: {error_msg}"
+                                break
+            except Exception as exc:
+                logger.exception("测试从第一个节点到节点 %s 的SSH连接时发生异常: %s", display_name, exc)
+                test_failures.append((display_name, target_internal_ip, str(exc)))
+                # 更新结果状态为警告
+                for r in results:
+                    if r["host"] == display_name:
+                        r["status"] = "warning"
+                        r["message"] = f"SSH互信配置完成，但连接测试异常: {exc}"
+                        break
+        
         success_count = sum(1 for r in results if r["status"] == "success")
+        warning_count = sum(1 for r in results if r["status"] == "warning")
+        
+        # 如果有连接测试失败，返回警告信息
+        if test_failures:
+            failure_details = "; ".join([f"{name}({ip}): {err}" for name, ip, err in test_failures])
+            warning_msg = f"SSH互信配置完成，但部分节点连接测试失败: {failure_details}"
+            logger.warning(warning_msg)
+            return json_response(
+                True,
+                data={"results": results, "successCount": success_count, "warningCount": warning_count, "totalCount": len(nodes), "testFailures": test_failures},
+                message=warning_msg
+            )
+        
         return json_response(
             True,
             data={"results": results, "successCount": success_count, "totalCount": len(nodes)},

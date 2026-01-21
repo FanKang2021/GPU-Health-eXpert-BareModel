@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
   AlertCircle,
+  AlertTriangle,
   CheckCircle2,
   Eye,
   EyeOff,
@@ -1234,7 +1235,9 @@ export default function BareMetal() {
       const result = await apiRequest<{
         results: Array<{ host: string; status: string; message: string; internalIp?: string }>
         successCount: number
+        warningCount?: number
         totalCount: number
+        testFailures?: Array<[string, string, string]>
       }>("/api/gpu-inspection/setup-ssh-trust", {
         method: "POST",
         body: JSON.stringify({ nodes: nodesPayload }),
@@ -1244,15 +1247,28 @@ export default function BareMetal() {
       setSshTrustResults(result?.results || [])
       
       const successCount = result?.successCount ?? 0
+      const warningCount = result?.warningCount ?? 0
       const totalCount = result?.totalCount ?? nodesToSetup.length
       
-      toast({
-        title: successCount === totalCount
-          ? tr("✅ SSH免密配置成功", "✅ SSH trust setup successful")
-          : tr("⚠️ SSH免密配置部分完成", "⚠️ SSH trust setup partially completed"),
-        description: `${successCount}/${totalCount} ${tr("个节点配置成功", "nodes configured successfully")}`,
-        variant: successCount === totalCount ? "default" : "destructive",
-      })
+      if (warningCount > 0) {
+        toast({
+          title: tr("⚠️ SSH免密配置完成但有警告", "⚠️ SSH trust setup completed with warnings"),
+          description: `${successCount}/${totalCount} ${tr("个节点配置成功", "nodes configured successfully")}, ${warningCount} ${tr("个节点连接测试失败", "nodes failed connection test")}`,
+          variant: "destructive",
+        })
+      } else if (successCount === totalCount) {
+        toast({
+          title: tr("✅ SSH免密配置成功", "✅ SSH trust setup successful"),
+          description: `${successCount}/${totalCount} ${tr("个节点配置成功", "nodes configured successfully")}`,
+          variant: "default",
+        })
+      } else {
+        toast({
+          title: tr("⚠️ SSH免密配置部分完成", "⚠️ SSH trust setup partially completed"),
+          description: `${successCount}/${totalCount} ${tr("个节点配置成功", "nodes configured successfully")}`,
+          variant: "destructive",
+        })
+      }
     } catch (error) {
       toast({
         title: tr("SSH免密配置失败", "SSH trust setup failed"),
@@ -1423,7 +1439,14 @@ export default function BareMetal() {
                 }
                 break
               } else if (statusResult.status === "failed") {
-                throw new Error(statusResult.error || tr("多机测试失败", "Multi-node test failed"))
+                // 测试失败，显示错误并退出轮询
+                const errorMsg = statusResult.error || tr("多机测试失败", "Multi-node test failed")
+                toast({
+                  title: tr("多机测试失败", "Multi-node test failed"),
+                  description: errorMsg,
+                  variant: "destructive",
+                })
+                break
               } else if (statusResult.status === "running") {
                 // 继续等待
                 await new Promise(resolve => setTimeout(resolve, 2000)) // 每2秒轮询一次
@@ -1436,7 +1459,8 @@ export default function BareMetal() {
                 // 用户取消，退出轮询
                 break
               }
-              // 其他错误，继续重试
+              // 网络错误或其他异常，记录并继续重试
+              console.error("轮询多机测试状态时发生错误:", error)
               await new Promise(resolve => setTimeout(resolve, 2000))
             }
           }
@@ -2529,6 +2553,11 @@ export default function BareMetal() {
                           <Badge className="bg-green-500/20 text-green-400 border border-green-500/40 text-xs shrink-0">
                             <CheckCircle2 className="w-3 h-3 mr-1" />
                             {tr("成功", "OK")}
+                          </Badge>
+                        ) : result.status === "warning" ? (
+                          <Badge className="bg-yellow-500/20 text-yellow-400 border border-yellow-500/40 text-xs shrink-0" title={result.message}>
+                            <AlertTriangle className="w-3 h-3 mr-1" />
+                            {tr("警告", "Warning")}
                           </Badge>
                         ) : (
                           <Badge className="bg-red-500/20 text-red-400 border border-red-500/40 text-xs shrink-0" title={result.message}>
