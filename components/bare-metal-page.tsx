@@ -2542,28 +2542,39 @@ export default function BareMetal() {
                     </div>
                   ) : sshTrustResults.length > 0 ? (
                     sshTrustResults.map((result, idx) => (
-                      <div key={idx} className="flex items-center justify-between text-xs gap-2">
-                        <div className="flex flex-col">
-                          <span className="font-mono text-slate-300">{result.host}</span>
-                          {(result as any).internalIp && (
-                            <span className="font-mono text-slate-500 text-[10px]">内网: {(result as any).internalIp}</span>
+                      <div key={idx} className="space-y-1">
+                        <div className="flex items-center justify-between text-xs gap-2">
+                          <div className="flex flex-col">
+                            <span className="font-mono text-slate-300">{result.host}</span>
+                            {(result as any).internalIp && (
+                              <span className="font-mono text-slate-500 text-[10px]">内网: {(result as any).internalIp}</span>
+                            )}
+                          </div>
+                          {result.status === "success" ? (
+                            <Badge className="bg-green-500/20 text-green-400 border border-green-500/40 text-xs shrink-0">
+                              <CheckCircle2 className="w-3 h-3 mr-1" />
+                              {tr("成功", "OK")}
+                            </Badge>
+                          ) : result.status === "warning" ? (
+                            <Badge className="bg-yellow-500/20 text-yellow-400 border border-yellow-500/40 text-xs shrink-0">
+                              <AlertTriangle className="w-3 h-3 mr-1" />
+                              {tr("警告", "Warning")}
+                            </Badge>
+                          ) : (
+                            <Badge className="bg-red-500/20 text-red-400 border border-red-500/40 text-xs shrink-0">
+                              <XCircle className="w-3 h-3 mr-1" />
+                              {tr("失败", "Failed")}
+                            </Badge>
                           )}
                         </div>
-                        {result.status === "success" ? (
-                          <Badge className="bg-green-500/20 text-green-400 border border-green-500/40 text-xs shrink-0">
-                            <CheckCircle2 className="w-3 h-3 mr-1" />
-                            {tr("成功", "OK")}
-                          </Badge>
-                        ) : result.status === "warning" ? (
-                          <Badge className="bg-yellow-500/20 text-yellow-400 border border-yellow-500/40 text-xs shrink-0" title={result.message}>
-                            <AlertTriangle className="w-3 h-3 mr-1" />
-                            {tr("警告", "Warning")}
-                          </Badge>
-                        ) : (
-                          <Badge className="bg-red-500/20 text-red-400 border border-red-500/40 text-xs shrink-0" title={result.message}>
-                            <XCircle className="w-3 h-3 mr-1" />
-                            {tr("失败", "Failed")}
-                          </Badge>
+                        {(result.status === "warning" || result.status === "error") && result.message && (
+                          <div className={`text-[10px] font-mono pl-1 border-l-2 ${
+                            result.status === "warning" 
+                              ? "text-yellow-400/80 border-yellow-500/40" 
+                              : "text-red-400/80 border-red-500/40"
+                          }`}>
+                            {result.message}
+                          </div>
                         )}
                       </div>
                     ))

@@ -1400,20 +1400,31 @@ def api_setup_ssh_trust():
                         error_msg = test_result.stderr or test_result.stdout or "SSH连接测试失败"
                         logger.error("从第一个节点到节点 %s (内网IP: %s) SSH连接测试失败: %s", display_name, target_internal_ip, error_msg)
                         test_failures.append((display_name, target_internal_ip, error_msg))
+                        # 提取关键错误信息（去除冗余前缀）
+                        clean_error = error_msg.strip()
+                        if "Permission denied" in clean_error:
+                            # 提取关键部分，如 "Permission denied (publickey)"
+                            if "(publickey)" in clean_error:
+                                clean_error = "Permission denied (publickey) - 公钥认证失败，请检查SSH配置"
+                            elif "(password)" in clean_error:
+                                clean_error = "Permission denied (password) - 密码认证失败"
+                            else:
+                                clean_error = "Permission denied - 权限被拒绝"
                         # 更新结果状态为警告
                         for r in results:
                             if r["host"] == display_name:
                                 r["status"] = "warning"
-                                r["message"] = f"SSH互信配置完成，但连接测试失败: {error_msg}"
+                                r["message"] = f"连接测试失败: {clean_error}"
                                 break
             except Exception as exc:
                 logger.exception("测试从第一个节点到节点 %s 的SSH连接时发生异常: %s", display_name, exc)
-                test_failures.append((display_name, target_internal_ip, str(exc)))
+                error_msg = str(exc)
+                test_failures.append((display_name, target_internal_ip, error_msg))
                 # 更新结果状态为警告
                 for r in results:
                     if r["host"] == display_name:
                         r["status"] = "warning"
-                        r["message"] = f"SSH互信配置完成，但连接测试异常: {exc}"
+                        r["message"] = f"连接测试异常: {error_msg}"
                         break
         
         success_count = sum(1 for r in results if r["status"] == "success")
