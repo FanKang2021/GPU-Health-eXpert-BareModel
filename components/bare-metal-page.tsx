@@ -376,6 +376,11 @@ const CORE_COMMANDS = [
     isKernelCheck: true,
   },
   {
+    name: "iommu_disabled",
+    description: { zh: "IOMMU已关闭（GPU性能优化）", en: "IOMMU disabled (GPU performance optimization)" },
+    isKernelCheck: true,
+  },
+  {
     name: "nvidia_fabricmanager_active",
     description: { zh: "NVIDIA Fabric Manager服务已激活", en: "NVIDIA Fabric Manager service is active" },
     isServiceCheck: true,

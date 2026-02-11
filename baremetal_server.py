@@ -671,6 +671,16 @@ class RemoteNodeRunner:
                 self.session.upload(nccl_tgz, remote_nccl_tgz)
                 self.session.upload(nccl_tests_tgz, remote_nccl_tests_tgz)
                 
+                # 检测OpenMPI版本
+                openmpi_version = detect_openmpi_version(self.session)
+                mpi_params = ""
+                if openmpi_version:
+                    mpi_home = f"/usr/mpi/gcc/openmpi-{openmpi_version}"
+                    mpi_params = f"MPI=1 MPI_HOME={mpi_home}"
+                    self.log(f"检测到OpenMPI版本: {openmpi_version}, 使用MPI参数: {mpi_params}")
+                else:
+                    self.log("未检测到OpenMPI，将不使用MPI参数编译")
+                
                 # 编译 nccl 和 nccl-tests
                 self.log("在远程节点编译 nccl 和 nccl-tests")
                 compile_script = f"""
@@ -704,7 +714,7 @@ rm -f {remote_nccl_tests_tgz}
 # 编译 nccl-tests
 echo "编译 nccl-tests..."
 cd {remote_nccl_tests_dir}
-make -j$(nproc) CUDA_HOME=/usr/local/cuda NCCL_HOME=$NCCL_HOME 2>&1 | tee /tmp/nccl_tests_build.log
+make -j$(nproc) CUDA_HOME=/usr/local/cuda NCCL_HOME=$NCCL_HOME {mpi_params} 2>&1 | tee /tmp/nccl_tests_build.log
 if [ $? -ne 0 ]; then
     echo "错误: nccl-tests 编译失败"
     cat /tmp/nccl_tests_build.log
@@ -1011,6 +1021,23 @@ def extract_cuda_version(nvcc_output: str) -> str:
     return ""
 
 
+def detect_openmpi_version(session: SSHSession) -> Optional[str]:
+    """
+    检测系统中安装的OpenMPI版本
+    从 /usr/mpi/gcc/ 目录下查找 openmpi-* 目录
+    返回版本号（如 "4.1.9a1"），如果未找到则返回 None
+    """
+    check_cmd = "ls -d /usr/mpi/gcc/openmpi-* 2>/dev/null | head -1 | sed 's|/usr/mpi/gcc/openmpi-||' || echo ''"
+    res = session.run(check_cmd)
+    version = res.stdout.strip()
+    if version:
+        logger.debug("检测到OpenMPI版本: %s", version)
+        return version
+    else:
+        logger.debug("未检测到OpenMPI安装")
+        return None
+
+
 def extract_nccl_version(apt_output: str, package_name: str) -> str:
     """从 apt list 输出中提取 NCCL 包版本"""
     import re
@@ -1164,6 +1191,15 @@ def api_check_commands():
                     logger.debug("ulimit_max_memory_size检查(以root权限): 原始行='%s', 提取值='%s', 是否unlimited=%s, 结果=%s", 
                                matched_line, value, is_unlimited, "通过" if is_unlimited else "失败")
                     results[cmd] = is_unlimited
+                # 检查 IOMMU 是否开启（如果存在 dmar* 文件则说明开启，检查项不通过）
+                elif cmd == "iommu_disabled":
+                    check_cmd = "ls /sys/class/iommu 2>/dev/null | grep -E '^dmar' | head -1 || echo ''"
+                    res = session.run(check_cmd)
+                    # 如果有输出说明存在 dmar* 文件，IOMMU 已开启，检查项不通过
+                    has_dmar = bool(res.stdout.strip())
+                    results[cmd] = not has_dmar
+                    logger.debug("IOMMU检查: 输出='%s', 存在dmar文件=%s, IOMMU已开启=%s, 结果=%s", 
+                               res.stdout.strip(), has_dmar, has_dmar, "通过" if not has_dmar else "失败")
                 elif "/" in cmd:
                     check_cmd = f"[ -x {cmd} ] && echo OK || echo MISSING"
                     res = session.run(check_cmd)
@@ -1560,7 +1596,17 @@ def run_multi_node_nccl_task(test_id: str, payload: Dict[str, Any]):
                 session.upload(nccl_tgz, remote_nccl_tgz)
                 session.upload(nccl_tests_tgz, remote_nccl_tests_tgz)
                 
-                compile_script = """
+                # 检测OpenMPI版本
+                openmpi_version = detect_openmpi_version(session)
+                mpi_params = ""
+                if openmpi_version:
+                    mpi_home = f"/usr/mpi/gcc/openmpi-{openmpi_version}"
+                    mpi_params = f"MPI=1 MPI_HOME={mpi_home}"
+                    logger.info(f"主节点检测到OpenMPI版本: {openmpi_version}, 使用MPI参数: {mpi_params}")
+                else:
+                    logger.info("主节点未检测到OpenMPI，将不使用MPI参数编译")
+                
+                compile_script = f"""
 set -e
 rm -rf /tmp/ghx/nccl /tmp/ghx/nccl-tests
 echo "解压 nccl.tgz..."
@@ -1580,7 +1626,7 @@ tar -xzf /tmp/ghx/nccl-tests.tgz -C /tmp/ghx
 rm -f /tmp/ghx/nccl-tests.tgz
 echo "编译 nccl-tests..."
 cd /tmp/ghx/nccl-tests
-make -j$(nproc) CUDA_HOME=/usr/local/cuda NCCL_HOME=$NCCL_HOME 2>&1 | tee /tmp/nccl_tests_build.log
+make -j$(nproc) CUDA_HOME=/usr/local/cuda NCCL_HOME=$NCCL_HOME {mpi_params} 2>&1 | tee /tmp/nccl_tests_build.log
 if [ $? -ne 0 ]; then
     echo "错误: nccl-tests 编译失败"
     cat /tmp/nccl_tests_build.log
@@ -1649,12 +1695,22 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 export NCCL_HOME=/tmp/ghx/nccl
+# 检测OpenMPI版本
+OPENMPI_VERSION=$(ls -d /usr/mpi/gcc/openmpi-* 2>/dev/null | head -1 | sed 's|/usr/mpi/gcc/openmpi-||' || echo '')
+MPI_PARAMS=""
+if [ -n "$OPENMPI_VERSION" ]; then
+    MPI_HOME="/usr/mpi/gcc/openmpi-$OPENMPI_VERSION"
+    MPI_PARAMS="MPI=1 MPI_HOME=$MPI_HOME"
+    echo "检测到OpenMPI版本: $OPENMPI_VERSION, 使用MPI参数: $MPI_PARAMS"
+else
+    echo "未检测到OpenMPI，将不使用MPI参数编译"
+fi
 echo "解压 nccl-tests.tgz..."
 tar -xzf /tmp/ghx/nccl-tests.tgz -C /tmp/ghx
 rm -f /tmp/ghx/nccl-tests.tgz
 echo "编译 nccl-tests..."
 cd /tmp/ghx/nccl-tests
-make -j$(nproc) CUDA_HOME=/usr/local/cuda NCCL_HOME=$NCCL_HOME 2>&1 | tee /tmp/nccl_tests_build.log
+make -j$(nproc) CUDA_HOME=/usr/local/cuda NCCL_HOME=$NCCL_HOME $MPI_PARAMS 2>&1 | tee /tmp/nccl_tests_build.log
 if [ $? -ne 0 ]; then
     echo "错误: nccl-tests 编译失败"
     cat /tmp/nccl_tests_build.log
