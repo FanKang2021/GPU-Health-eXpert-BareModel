@@ -210,6 +210,14 @@ const downloadBlob = (filename: string, blob: Blob) => {
 const API_BASE_URL = getApiBaseUrl()
 const LANGUAGE_STORAGE_KEY = "ghx-language"
 
+// 自动调整多行输入框高度，保持在合理范围
+const autoResizeTextarea = (element: HTMLTextAreaElement | null, minHeight = 96, maxHeight = 320) => {
+  if (!element) return
+  element.style.height = "auto"
+  const newHeight = Math.min(Math.max(element.scrollHeight, minHeight), maxHeight)
+  element.style.height = `${newHeight}px`
+}
+
 async function apiRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
   const base = API_BASE_URL
   const url =
@@ -539,6 +547,7 @@ export default function BareMetal() {
   const [currentPage, setCurrentPage] = useState(1)
   const [pageSize] = useState(10)
   const [lastTestDetails, setLastTestDetails] = useState<SSHTestResult | null>(null)
+  const hostTextareaRef = useRef<HTMLTextAreaElement | null>(null)
 
   // 从 localStorage 加载节点列表
   useEffect(() => {
@@ -640,6 +649,12 @@ export default function BareMetal() {
   const pollErrorOnceRef = useRef(false)
   const [gpuBenchmarks, setGpuBenchmarks] = useState<BenchmarkMap>(DEFAULT_GPU_BENCHMARKS)
   const benchmarkEntries = useMemo(() => Object.entries(gpuBenchmarks), [gpuBenchmarks])
+
+  // 根据内容自动调整节点地址输入框高度
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    autoResizeTextarea(hostTextareaRef.current)
+  }, [sshConfig.host])
 
   const allCommandsAvailable = useMemo(
     () => CORE_COMMANDS.every((cmd) => commandStatus[cmd.name] === "available"),
@@ -905,11 +920,29 @@ export default function BareMetal() {
     }
 
     const entries = parseHostEntries(sshConfig.host)
-    
+
+    // 多行场景下，确保当前输入的所有节点都已经完成最新一轮批量 SSH 测试
+    if (entries.length > 1) {
+      const keysInInput = new Set(
+        entries.map((entry) => `${entry.host}:${entry.port || sshConfig.port || "22"}`),
+      )
+      const testedKeys = new Set(Object.keys(batchTestResults))
+      const hasUntested = Array.from(keysInInput).some((key) => !testedKeys.has(key))
+      if (hasUntested) {
+        toast({
+          title: tr("请先对所有节点进行SSH批量测试", "Please run SSH batch test for all hosts first"),
+          description: tr("新输入的节点尚未进行SSH连接测试", "Some new hosts have not passed the SSH connection test"),
+          variant: "destructive",
+        })
+        return
+      }
+    }
+
     // 批量添加：只添加测试成功的节点
     if (entries.length > 1 && Object.keys(batchTestResults).length > 0) {
+      const validKeys = new Set(entries.map((entry) => `${entry.host}:${entry.port}`))
       const successEntries = Object.entries(batchTestResults)
-        .filter(([, result]) => result.status === "success")
+        .filter(([key, result]) => validKeys.has(key) && result.status === "success")
         .map(([key, result]) => {
           const [host] = key.split(':')
           return { host, port: result.port, details: result.details }
@@ -955,6 +988,11 @@ export default function BareMetal() {
           title: tr("批量添加完成", "Batch add completed"),
           description: `${tr("已添加", "Added")} ${newNodes.length} ${tr("个节点", "nodes")}${skipped > 0 ? `, ${tr("跳过", "skipped")} ${skipped} ${tr("个已存在", "existing")}` : ""}`,
         })
+        // 批量添加成功后清空输入与状态，便于下一次添加新的节点列表
+        setSshConfig((prev) => ({ ...prev, host: "" }))
+        setLastTestDetails(null)
+        setBatchTestResults({})
+        setSshStatus("idle")
       } else {
         toast({
           title: tr("所有节点已存在", "All nodes already exist"),
@@ -996,6 +1034,11 @@ export default function BareMetal() {
         title: tr("节点已加入待检查列表", "Node added to pending list"),
         description: nodeDisplay,
       })
+      // 单节点添加成功后，同样重置输入与状态，避免浏览器看起来“缓存”了旧列表
+      setSshConfig((prev) => ({ ...prev, host: "" }))
+      setLastTestDetails(null)
+      setBatchTestResults({})
+      setSshStatus("idle")
     } catch (error) {
       toast({
         title: tr("无法添加节点", "Unable to add node"),
@@ -1630,10 +1673,15 @@ export default function BareMetal() {
                   <span className="text-xs text-slate-500 ml-2">{tr("(每行一个，不带端口则使用右侧端口)", "(one per line, uses port field if not specified)")}</span>
                 </Label>
                 <textarea
+                  ref={hostTextareaRef}
                   value={sshConfig.host}
-                  onChange={(e) => setSshConfig((prev) => ({ ...prev, host: e.target.value }))}
+                  onChange={(e) => {
+                    const value = e.target.value
+                    setSshConfig((prev) => ({ ...prev, host: value }))
+                    autoResizeTextarea(hostTextareaRef.current)
+                  }}
                   placeholder={tr("192.168.1.1\n192.168.1.2:60114\n192.168.1.3:60125", "192.168.1.1\n192.168.1.2:60114\n192.168.1.3:60125")}
-                  className="w-full h-24 bg-slate-800/50 border border-slate-700 text-white rounded-md p-3 text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-blue-500/50 mt-2"
+                  className="w-full bg-slate-800/50 border border-slate-700 text-white rounded-md p-3 text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-blue-500/50 mt-2"
                 />
               </div>
 
