@@ -34,15 +34,15 @@ interface TroubleshootingPageProps {
 
 // GPU基准值配置
 const defaultGpuBenchmarks = {
-  "RTX 3090": { p2p: 18, nccl: 7, bw: 20 },
-  L40S: { p2p: 28, nccl: 9, bw: 20 },
-  "RTX 4090": { p2p: 18, nccl: 7, bw: 20 },
-  A100: { p2p: 420, nccl: 70, bw: 20 },
-  A800: { p2p: 340, nccl: 55, bw: 20 },
-  H100: { p2p: 700, nccl: 139, bw: 40 },
-  H800: { p2p: 340, nccl: 65, bw: 47 },
-  H20: { p2p: 700, nccl: 139, bw: 47 },
-  H200: { p2p: 730, nccl: 145, bw: 54 },
+  "RTX 3090": { d2d: 18, nccl: 7, h2d_d2h: 20 },
+  L40S: { d2d: 30, nccl: 9, h2d_d2h: 20 },
+  "RTX 4090": { d2d: 18, nccl: 7, h2d_d2h: 20 },
+  A100: { d2d: 420, nccl: 70, h2d_d2h: 20 },
+  A800: { d2d: 340, nccl: 55, h2d_d2h: 20 },
+  H100: { d2d: 700, nccl: 139, h2d_d2h: 50 },
+  H800: { d2d: 340, nccl: 65, h2d_d2h: 47 },
+  H20: { d2d: 700, nccl: 139, h2d_d2h: 47 },
+  H200: { d2d: 705, nccl: 145, h2d_d2h: 50 },
 }
 
 // 检查项目配置
@@ -53,22 +53,12 @@ const checkItems = {
       label: "nvBandwidthTest",
       description: "测试CPU与GPU间内存拷贝带宽性能，使用nvbandwidth工具评估数据传输效率",
     },
-    {
-      id: "p2pBandwidthLatencyTest",
-      label: "p2pBandwidthLatencyTest",
-      description: "测试GPU间点对点通信带宽和延迟，评估多GPU协作性能",
-    },
     { id: "ncclTests", label: "NCCL Tests", description: "测试NVIDIA集合通信库性能，评估分布式训练通信效率" },
     { id: "dcgmDiag", label: "DCGM Diagnostics", description: "NVIDIA数据中心GPU管理器诊断，检查GPU硬件健康状态" },
     { id: "ibCheck", label: "IB Check", description: "InfiniBand网络连接检查，确保高速网络通信正常" },
   ],
   en: [
     { id: "nvbandwidthTest", label: "nvBandwidthTest", description: "Test CPU-GPU memory copy bandwidth performance" },
-    {
-      id: "p2pBandwidthLatencyTest",
-      label: "p2pBandwidthLatencyTest",
-      description: "Test GPU peer-to-peer communication bandwidth and latency",
-    },
     { id: "ncclTests", label: "NCCL Tests", description: "Test NVIDIA Collective Communications Library performance" },
     { id: "dcgmDiag", label: "DCGM Diagnostics", description: "NVIDIA Data Center GPU Manager diagnostics" },
     { id: "ibCheck", label: "IB Check", description: "InfiniBand network connection check" },
@@ -114,7 +104,6 @@ export default function TroubleshootingPage({ language, t }: TroubleshootingPage
   // 健康检查状态
   const [selectedCheckItems, setSelectedCheckItems] = useState<string[]>([
     "nvbandwidthTest",
-    "p2pBandwidthLatencyTest",
     "ncclTests",
     "dcgmDiag",
     "ibCheck",
@@ -257,7 +246,6 @@ export default function TroubleshootingPage({ language, t }: TroubleshootingPage
           nodeHost,
           gpuType: "H200",
           nvbandwidthTest: "54.9 GB/s",
-          p2pBandwidthLatencyTest: "736.40 GB/s",
           ncclTests: "150.946 GB/s",
           dcgmDiag: commandStatus.dcgmi ? "Pass" : "Skipped",
           ibCheck: "Pass",
@@ -613,7 +601,6 @@ export default function TroubleshootingPage({ language, t }: TroubleshootingPage
                         <TableHead>{language === "zh" ? "节点" : "Node"}</TableHead>
                         <TableHead>{language === "zh" ? "GPU类型" : "GPU Type"}</TableHead>
                         {selectedCheckItems.includes("nvbandwidthTest") && <TableHead>nvBandwidth</TableHead>}
-                        {selectedCheckItems.includes("p2pBandwidthLatencyTest") && <TableHead>P2P</TableHead>}
                         {selectedCheckItems.includes("ncclTests") && <TableHead>NCCL</TableHead>}
                         {selectedCheckItems.includes("dcgmDiag") && <TableHead>DCGM</TableHead>}
                         {selectedCheckItems.includes("ibCheck") && <TableHead>IB</TableHead>}
@@ -628,9 +615,6 @@ export default function TroubleshootingPage({ language, t }: TroubleshootingPage
                           </TableCell>
                           {selectedCheckItems.includes("nvbandwidthTest") && (
                             <TableCell className="text-tech-green">{result.nvbandwidthTest}</TableCell>
-                          )}
-                          {selectedCheckItems.includes("p2pBandwidthLatencyTest") && (
-                            <TableCell className="text-tech-green">{result.p2pBandwidthLatencyTest}</TableCell>
                           )}
                           {selectedCheckItems.includes("ncclTests") && (
                             <TableCell className="text-tech-green">{result.ncclTests}</TableCell>
@@ -681,18 +665,18 @@ export default function TroubleshootingPage({ language, t }: TroubleshootingPage
                 <TableHeader>
                   <TableRow>
                     <TableHead>{language === "zh" ? "GPU型号" : "GPU Model"}</TableHead>
-                    <TableHead>P2P (GB/s)</TableHead>
+                    <TableHead>D2D (GB/s)</TableHead>
                     <TableHead>NCCL (GB/s)</TableHead>
-                    <TableHead>BW (GB/s)</TableHead>
+                    <TableHead>H2D/D2H (GB/s)</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {Object.entries(gpuBenchmarks).map(([model, values]) => (
                     <TableRow key={model}>
                       <TableCell className="font-semibold">{model}</TableCell>
-                      <TableCell>{values.p2p}</TableCell>
+                      <TableCell>{values.d2d}</TableCell>
                       <TableCell>{values.nccl}</TableCell>
-                      <TableCell>{values.bw}</TableCell>
+                      <TableCell>{values.h2d_d2h}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>

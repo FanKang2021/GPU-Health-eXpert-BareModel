@@ -4,8 +4,8 @@
 GHX Bare-Metal Orchestrator
 通过SSH在裸金属节点上运行GPU健康检查
 1. 支持SSH连接测试与基础命令检查
-2. 通过后台Job执行nvbandwidth/p2p/nccl/dcgm/ib检查
-3. 将nvbandwidth、p2pBandwidthLatencyTest上传到目标主机的/tmp/ghx目录执行；上传nccl.tgz和nccl-tests.tgz源码到目标主机并在本地编译（适配CUDA和GLIBC版本）
+2. 通过后台Job执行nvbandwidth/nccl/dcgm/ib检查
+3. 将nvbandwidth上传到目标主机的/tmp/ghx目录执行；上传nccl.tgz和nccl-tests.tgz源码到目标主机并在本地编译（适配CUDA和GLIBC版本）
 """
 from __future__ import annotations
 
@@ -39,9 +39,9 @@ BASE_DIR = Path(__file__).resolve().parent
 ASSET_DIR = Path(os.getenv("GHX_ASSET_DIR", str(BASE_DIR)))
 ASSETS = {
     "nvbandwidth": ASSET_DIR / "nvbandwidth",
-    "p2p": ASSET_DIR / "p2pBandwidthLatencyTest",
     "nccl": ASSET_DIR / "nccl.tgz",
     "nccl_tests": ASSET_DIR / "nccl-tests.tgz",
+    "nccl_sharp_plugins": ASSET_DIR / "nccl-rdma-sharp-plugins.tgz",
     "ib_check": ASSET_DIR / "ib_health_check.sh",
 }
 
@@ -50,14 +50,16 @@ for name, path in ASSETS.items():
         logging.warning("Asset %s not found at %s", name, path)
 
 FALLBACK_GPU_BENCHMARKS = {
-    "RTX 3090": {"p2p": 18, "nccl": 7, "bw": 20},
-    "L40S": {"p2p": 28, "nccl": 9, "bw": 20},
-    "RTX 4090": {"p2p": 18, "nccl": 7, "bw": 20},
-    "A100": {"p2p": 420, "nccl": 70, "bw": 20},
-    "A800": {"p2p": 340, "nccl": 55, "bw": 20},
-    "H100": {"p2p": 700, "nccl": 139, "bw": 40},
-    "H800": {"p2p": 340, "nccl": 65, "bw": 47},
-    "H200": {"p2p": 730, "nccl": 145, "bw": 54},
+    # 对齐 test.py 的基准值：d2d / h2d_d2h / nccl
+    "RTX 3090": {"d2d": 18, "nccl": 7, "h2d_d2h": 20},
+    "L40S": {"d2d": 30, "nccl": 9, "h2d_d2h": 20},
+    "RTX 4090": {"d2d": 18, "nccl": 7, "h2d_d2h": 20},
+    "A100": {"d2d": 420, "nccl": 70, "h2d_d2h": 20},
+    "A800": {"d2d": 340, "nccl": 55, "h2d_d2h": 20},
+    "H100": {"d2d": 700, "nccl": 139, "h2d_d2h": 50},
+    "H800": {"d2d": 340, "nccl": 65, "h2d_d2h": 47},
+    "H200": {"d2d": 705, "nccl": 145, "h2d_d2h": 50},
+    "B200": {"d2d": 1380, "nccl": 185, "h2d_d2h": 50},
 }
 
 BENCHMARK_FILE = os.getenv("GPU_BENCHMARK_FILE", str(BASE_DIR / "config" / "gpu-benchmarks.json"))
@@ -350,11 +352,63 @@ def parse_nvbandwidth(output: str) -> float:
         for chunk in parts[1:]:
             try:
                 value = float(chunk)
-                if 10 <= value <= 1200:
+                # h2d/d2h 通常在较小区间（与 d2d matrix 形成区分）
+                if 5.0 <= value <= 200.0:
                     values.append(value)
             except ValueError:
                 break
     return min(values) if values else 0.0
+
+
+def parse_nvbandwidth_d2d_total_bandwidth(output: str) -> float:
+    """
+    专门解析 nvbandwidth d2d（read/write）测试的 Total bandwidth (GB/s) 矩阵，
+    排除对角线 N/A，返回所有可解析值中的最小值。
+    """
+    try:
+        lines = output.split("\n")
+        bandwidth_values: List[float] = []
+        in_total_bandwidth_table = False
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            if "total bandwidth" in line.lower() and "(gb/s)" in line.lower():
+                in_total_bandwidth_table = True
+                continue
+
+            if in_total_bandwidth_table:
+                # 遇到新段落/结束标记则停止
+                if line.upper().startswith("SUM ") or "read1" in line.lower() or "write1" in line.lower():
+                    break
+
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+
+                try:
+                    row_idx = int(parts[0])
+                except ValueError:
+                    continue
+
+                # 从第二列开始解析（第一列是 GPU 索引）
+                for col_idx, part in enumerate(parts[1:], start=0):
+                    if row_idx == col_idx:
+                        continue
+                    if part.upper() in ["N/A", "NA", "-"]:
+                        continue
+                    try:
+                        value = float(part)
+                    except ValueError:
+                        continue
+                    if 50.0 <= value <= 2000.0:
+                        bandwidth_values.append(value)
+
+        return min(bandwidth_values) if bandwidth_values else 0.0
+    except Exception:
+        return 0.0
 
 
 def parse_p2p(output: str) -> float:
@@ -489,19 +543,6 @@ class RemoteNodeRunner:
                 results["nvbandwidth"] = result
                 if result.get("rawOutput"):
                     self.log(f"nvbandwidth命令输出:\n{result['rawOutput']}")
-            if "p2p" in self.tests:
-                if self.cancelled.is_set():
-                    self.log("任务已被取消，停止执行p2p测试")
-                    return {
-                        "results": results,
-                        "overallStatus": "cancelled",
-                        "executionLog": "\n".join(self.logs),
-                        "gpuType": self.node_meta.get("gpuType", "Unknown"),
-                    }
-                result = self._run_p2p()
-                results["p2p"] = result
-                if result.get("rawOutput"):
-                    self.log(f"p2pBandwidthLatencyTest命令输出:\n{result['rawOutput']}")
             if "nccl" in self.tests:
                 if self.cancelled.is_set():
                     self.log("任务已被取消，停止执行nccl测试")
@@ -582,35 +623,82 @@ class RemoteNodeRunner:
     def _run_nvbandwidth(self) -> Dict[str, Any]:
         try:
             remote_bin = self._upload_asset("nvbandwidth", "nvbandwidth")
+            # 用 -t 进行四项测试（与 nvbandwidth 帮助索引一致）
+            # -t 2: h2d (host_to_device)
+            # -t 3: d2h (device_to_host)
+            # -t 6: d2d bidirectional read CE (device_to_device_bidirectional_memcpy_read_ce)
+            # -t 7: d2d bidirectional write CE (device_to_device_bidirectional_memcpy_write_ce)
             h2d = self.session.run(
-                f"cd {self.remote_dir} && {remote_bin} -t host_to_device_memcpy_ce",
+                f"cd {self.remote_dir} && {remote_bin} -t 2",
                 timeout=600,
                 require_root=True,
             )
             d2h = self.session.run(
-                f"cd {self.remote_dir} && {remote_bin} -t device_to_host_memcpy_ce",
+                f"cd {self.remote_dir} && {remote_bin} -t 3",
                 timeout=600,
                 require_root=True,
             )
-            if h2d.exit_code != 0 or d2h.exit_code != 0:
-                raise RuntimeError(f"nvbandwidth命令执行失败: H2D={h2d.exit_code}, D2H={d2h.exit_code}")
+            d2d_read = self.session.run(
+                f"cd {self.remote_dir} && {remote_bin} -t 6",
+                timeout=600,
+                require_root=True,
+            )
+            d2d_write = self.session.run(
+                f"cd {self.remote_dir} && {remote_bin} -t 7",
+                timeout=600,
+                require_root=True,
+            )
+
+            if any(r.exit_code != 0 for r in (h2d, d2h, d2d_read, d2d_write)):
+                raise RuntimeError(
+                    "nvbandwidth命令执行失败: "
+                    f"H2D={h2d.exit_code}, D2H={d2h.exit_code}, D2D_READ={d2d_read.exit_code}, D2D_WRITE={d2d_write.exit_code}"
+                )
+
             h2d_value = parse_nvbandwidth(h2d.stdout)
             d2h_value = parse_nvbandwidth(d2h.stdout)
-            valid_values = [v for v in (h2d_value, d2h_value) if v > 0]
+            d2d_read_value = parse_nvbandwidth_d2d_total_bandwidth(d2d_read.stdout)
+            d2d_write_value = parse_nvbandwidth_d2d_total_bandwidth(d2d_write.stdout)
+
+            # 计算综合 d2d：与 test.py 保持一致（两者都 >0 用 min，否则取 max）
+            if d2d_read_value > 0 and d2d_write_value > 0:
+                d2d_value = min(d2d_read_value, d2d_write_value)
+            else:
+                d2d_value = max(d2d_read_value, d2d_write_value)
+
+            valid_values = [v for v in (h2d_value, d2h_value, d2d_value) if v > 0]
             if not valid_values:
-                raise RuntimeError("nvbandwidth未解析到有效结果")
-            value = min(valid_values)
-            benchmark = self.benchmark_for("bw")
-            passed = benchmark is None or value >= benchmark
-            self.log(f"nvbandwidth测试完成: {value:.1f} GB/s")
+                raise RuntimeError("nvbandwidth未解析到有效结果（h2d/d2h/d2d）")
+
+            raw_value = min(valid_values)
+
+            benchmark_h2d_d2h = self.benchmark_for("h2d_d2h")
+            benchmark_d2d = self.benchmark_for("d2d")
+
+            passed_h2d_d2h = benchmark_h2d_d2h is None or (h2d_value >= benchmark_h2d_d2h and d2h_value >= benchmark_h2d_d2h)
+            passed_d2d = benchmark_d2d is None or d2d_value >= benchmark_d2d
+            passed = passed_h2d_d2h and passed_d2d
+
+            self.log(
+                f"nvbandwidth测试完成: raw={raw_value:.1f} GB/s, H2D={h2d_value:.1f}, D2H={d2h_value:.1f}, D2D={d2d_value:.1f}"
+            )
+
             return {
                 "status": "passed" if passed else "failed",
-                "value": value,
+                "value": raw_value,
                 "unit": "GB/s",
-                "benchmark": benchmark,
+                # 为了前端展示保留一个 benchmark 值：展示 h2d_d2h 基准
+                "benchmark": benchmark_h2d_d2h,
                 "passed": passed,
-                "details": {"h2d": h2d_value, "d2h": d2h_value},
-                "rawOutput": f"{h2d.stdout}\n{d2h.stdout}",
+                "details": {
+                    "h2d": h2d_value,
+                    "d2h": d2h_value,
+                    "d2d_read": d2d_read_value,
+                    "d2d_write": d2d_write_value,
+                    "d2d": d2d_value,
+                    "benchmarks": {"h2d_d2h": benchmark_h2d_d2h, "d2d": benchmark_d2d},
+                },
+                "rawOutput": f"{h2d.stdout}\n{d2h.stdout}\n{d2d_read.stdout}\n{d2d_write.stdout}",
             }
         except Exception as exc:  # pylint: disable=broad-except
             self.log(f"nvbandwidth测试失败: {exc}")
@@ -618,10 +706,10 @@ class RemoteNodeRunner:
 
     def _run_p2p(self) -> Dict[str, Any]:
         try:
-            remote_bin = self._upload_asset("p2p", "p2pBandwidthLatencyTest")
+            remote_bin = self._upload_asset("p2p", "p2p_tool")
             result = self.session.run(f"cd {self.remote_dir} && {remote_bin}", timeout=900, require_root=True)
             if result.exit_code != 0:
-                raise RuntimeError(result.stderr or "p2pBandwidthLatencyTest 执行失败")
+                raise RuntimeError(result.stderr or "p2p 工具执行失败")
             value = parse_p2p(result.stdout)
             if value <= 0:
                 raise RuntimeError("P2P测试未解析到有效带宽")
@@ -1506,7 +1594,9 @@ def run_multi_node_nccl_task(test_id: str, payload: Dict[str, Any]):
         hostfile_content = payload.get("hostfileContent")
         mpi_params = payload.get("mpiParams", {})
         connection = payload.get("connection")
-        
+        # 仅当前端勾选 SHARP 时才编译/安装 nccl-rdma-sharp-plugins，缩短非 SHARP 场景编译时间
+        sharp_compile_requested = bool(mpi_params.get("sharp_enabled"))
+
         # 解析hosts
         if hostfile_content:
             host_list = [h.strip() for h in hostfile_content.strip().split('\n') if h.strip()]
@@ -1519,55 +1609,72 @@ def run_multi_node_nccl_task(test_id: str, payload: Dict[str, Any]):
             raise ValueError("多机测试至少需要2个节点")
         
         np_count = len(host_list)
-        
-        # 构建mpirun命令
+        gpu_count = mpi_params.get("gpuPerNode", 8)
+        all_reduce_perf = (mpi_params.get("all_reduce_perf_path") or "/opt/nccl-tests/build/all_reduce_perf").strip()
+
+        # 构建 mpirun 命令（对齐新版 NCCL/UCX 多机测试模板）
         mpi_cmd_parts = [
             "mpirun",
             f"-np {np_count}",
             "--allow-run-as-root",
-            "-N 1",
+            "-bind-to core",
+            "-x LD_LIBRARY_PATH=/usr/local/lib/:$LD_LIBRARY_PATH",
         ]
-        
+
+        if mpi_params.get("btl_tcp_if"):
+            mpi_cmd_parts.append(f"--mca btl_tcp_if_include {mpi_params['btl_tcp_if']}")
+            mpi_cmd_parts.append(f"--mca oob_tcp_if_include {mpi_params['btl_tcp_if']}")
+
+        if mpi_params.get("nccl_socket_ifname"):
+            mpi_cmd_parts.append(f"-x NCCL_SOCKET_IFNAME={mpi_params['nccl_socket_ifname']}")
+
+        if mpi_params.get("nccl_ib_hca"):
+            mpi_cmd_parts.append(f"-x NCCL_IB_HCA={mpi_params['nccl_ib_hca']}")
+
+        if mpi_params.get("ucx_net_devices"):
+            mpi_cmd_parts.append(f"-x UCX_NET_DEVICES={mpi_params['ucx_net_devices']}")
+
+        if mpi_params.get("sharp_enabled"):
+            mpi_cmd_parts.append("-x SHARP_COLL_ENABLE=1")
+            mpi_cmd_parts.append("-x SHARP_LOG_LEVEL=info")
+            mpi_cmd_parts.append("-x NCCL_COLLNET_ENABLE=1")
+
+        if mpi_params.get("nccl_ib_qps"):
+            mpi_cmd_parts.append(f"-x NCCL_IB_QPS_PER_CONNECTION={mpi_params['nccl_ib_qps']}")
+
+        if mpi_params.get("nccl_cross_nic") is not None and str(mpi_params.get("nccl_cross_nic")).strip() != "":
+            mpi_cmd_parts.append(f"-x NCCL_CROSS_NIC={mpi_params['nccl_cross_nic']}")
+
+        if mpi_params.get("ucx_tls"):
+            mpi_cmd_parts.append(f"-x UCX_TLS={mpi_params['ucx_tls']}")
+
+        if mpi_params.get("nccl_debug"):
+            mpi_cmd_parts.append(f"-x NCCL_DEBUG={mpi_params['nccl_debug']}")
+
+        # 兼容旧版前端仍可能传入的可选参数
+        if mpi_params.get("nccl_pxn_disable") is not None and str(mpi_params.get("nccl_pxn_disable")).strip() != "":
+            mpi_cmd_parts.append(f"-x NCCL_PXN_DISABLE={mpi_params['nccl_pxn_disable']}")
+
+        if mpi_params.get("nccl_min_nchannels"):
+            mpi_cmd_parts.append(f"-x NCCL_MIN_NCHANNELS={mpi_params['nccl_min_nchannels']}")
+
+        if mpi_params.get("nccl_nvls_enable") is not None and str(mpi_params.get("nccl_nvls_enable")).strip() != "":
+            mpi_cmd_parts.append(f"-x NCCL_NVLS_ENABLE={mpi_params['nccl_nvls_enable']}")
+
+        # 已弃用：SHARP_COLL_ENABLE_PCI_RELAXED_ORDERING（由前端 sharp_enabled 替代）
+
+        if mpi_params.get("extra"):
+            mpi_cmd_parts.append(mpi_params["extra"])
+
         if hostfile_content:
             mpi_cmd_parts.append("-hostfile /tmp/ghx/hostfile")
         else:
             mpi_cmd_parts.append(f"-host {','.join(host_list)}")
-        
-        # 添加用户自定义参数
-        if mpi_params.get("btl_tcp_if"):
-            mpi_cmd_parts.append(f"--mca btl_tcp_if_include {mpi_params['btl_tcp_if']}")
-            mpi_cmd_parts.append(f"--mca oob_tcp_if_include {mpi_params['btl_tcp_if']}")
-        
-        if mpi_params.get("nccl_socket_ifname"):
-            mpi_cmd_parts.append(f"-x NCCL_SOCKET_IFNAME={mpi_params['nccl_socket_ifname']}")
-        
-        if mpi_params.get("nccl_ib_hca"):
-            mpi_cmd_parts.append(f"-x NCCL_IB_HCA={mpi_params['nccl_ib_hca']}")
-        
-        if mpi_params.get("ucx_net_devices"):
-            mpi_cmd_parts.append(f"-x UCX_NET_DEVICES={mpi_params['ucx_net_devices']}")
-        
-        if mpi_params.get("nccl_ib_qps"):
-            mpi_cmd_parts.append(f"-x NCCL_IB_QPS_PER_CONNECTION={mpi_params['nccl_ib_qps']}")
-        
-        if mpi_params.get("nccl_pxn_disable") is not None:
-            mpi_cmd_parts.append(f"-x NCCL_PXN_DISABLE={mpi_params['nccl_pxn_disable']}")
-        
-        if mpi_params.get("nccl_min_nchannels"):
-            mpi_cmd_parts.append(f"-x NCCL_MIN_NCHANNELS={mpi_params['nccl_min_nchannels']}")
-        
-        if mpi_params.get("nccl_nvls_enable") is not None:
-            mpi_cmd_parts.append(f"-x NCCL_NVLS_ENABLE={mpi_params['nccl_nvls_enable']}")
-        
-        if mpi_params.get("sharp_relaxed_ordering"):
-            mpi_cmd_parts.append("-x SHARP_COLL_ENABLE_PCI_RELAXED_ORDERING=1")
-        
-        if mpi_params.get("extra"):
-            mpi_cmd_parts.append(mpi_params['extra'])
-        
-        gpu_count = mpi_params.get("gpuPerNode", 8)
-        mpi_cmd_parts.append(f"/tmp/ghx/nccl-tests/build/all_reduce_perf -b 128M -e 16G -f 2 -g {gpu_count}")
-        
+
+        mpi_cmd_parts.append(
+            f"{all_reduce_perf} -b 128M -e 16G -f 2 -g {gpu_count} -c 0 -t 1"
+        )
+
         mpi_command = " \\\n".join(mpi_cmd_parts)
         
         # 连接主节点执行
@@ -1578,13 +1685,27 @@ def run_multi_node_nccl_task(test_id: str, payload: Dict[str, Any]):
                 hostfile_path = "/tmp/ghx/hostfile"
                 session.run(f"cat > {hostfile_path} << 'EOF'\n{hostfile_content}\nEOF")
             
-            # 检查主节点nccl-tests是否存在，不存在则上传并编译
-            check_res = session.run("[ -f /tmp/ghx/nccl-tests/build/all_reduce_perf ] && echo OK || echo MISSING")
-            if check_res.stdout.strip() != "OK":
-                logger.info("主节点 nccl-tests 不存在，开始上传源码并编译")
+            # 检查主节点 nccl-tests 与 nccl-rdma-sharp-plugins 是否存在，不存在则上传并编译
+            sharp_plugins_marker = "/tmp/ghx/nccl-rdma-sharp-plugins/.build_complete"
+            check_res = session.run(
+                "[ -f /tmp/ghx/nccl-tests/build/all_reduce_perf ] && echo NCCL_OK || echo NCCL_MISSING; "
+                f"[ -f {sharp_plugins_marker} ] && echo PLUGINS_OK || echo PLUGINS_MISSING"
+            )
+            check_text = check_res.stdout.strip()
+            sharp_plugins_tgz = ASSETS.get("nccl_sharp_plugins")
+            sharp_plugins_asset_exists = sharp_plugins_tgz is not None and sharp_plugins_tgz.exists()
+            needs_plugins_compile = (
+                sharp_compile_requested
+                and sharp_plugins_asset_exists
+                and "PLUGINS_MISSING" in check_text
+            )
+            needs_compile = ("NCCL_MISSING" in check_text) or needs_plugins_compile
+            if needs_compile:
+                logger.info("主节点 nccl-tests 或 sharp 插件需要准备，开始上传源码并编译")
                 
                 nccl_tgz = ASSETS["nccl"]
                 nccl_tests_tgz = ASSETS["nccl_tests"]
+                # sharp_plugins_tgz 由外层已判断是否存在
                 
                 if not nccl_tgz.exists():
                     raise FileNotFoundError(f"nccl.tgz 文件不存在: {nccl_tgz}")
@@ -1593,19 +1714,62 @@ def run_multi_node_nccl_task(test_id: str, payload: Dict[str, Any]):
                 
                 remote_nccl_tgz = "/tmp/ghx/nccl.tgz"
                 remote_nccl_tests_tgz = "/tmp/ghx/nccl-tests.tgz"
+                remote_sharp_plugins_tgz = "/tmp/ghx/nccl-rdma-sharp-plugins.tgz"
                 session.upload(nccl_tgz, remote_nccl_tgz)
                 session.upload(nccl_tests_tgz, remote_nccl_tests_tgz)
                 
+                sharp_plugins_enabled = sharp_compile_requested and sharp_plugins_tgz is not None and sharp_plugins_tgz.exists()
+                if sharp_plugins_enabled:
+                    session.upload(sharp_plugins_tgz, remote_sharp_plugins_tgz)
+                elif sharp_compile_requested and not sharp_plugins_asset_exists:
+                    logger.warning("nccl-rdma-sharp-plugins.tgz 不存在，跳过 sharp 插件编译")
+                elif not sharp_compile_requested:
+                    logger.info("未启用 SHARP，跳过 nccl-rdma-sharp-plugins 上传与编译")
+                
                 # 检测OpenMPI版本
                 openmpi_version = detect_openmpi_version(session)
-                mpi_params = ""
+                compile_mpi_flags = ""
                 if openmpi_version:
                     mpi_home = f"/usr/mpi/gcc/openmpi-{openmpi_version}"
-                    mpi_params = f"MPI=1 MPI_HOME={mpi_home}"
-                    logger.info(f"主节点检测到OpenMPI版本: {openmpi_version}, 使用MPI参数: {mpi_params}")
+                    compile_mpi_flags = f"MPI=1 MPI_HOME={mpi_home}"
+                    logger.info(f"主节点检测到OpenMPI版本: {openmpi_version}, 使用MPI参数: {compile_mpi_flags}")
                 else:
                     logger.info("主节点未检测到OpenMPI，将不使用MPI参数编译")
                 
+                sharp_plugins_compile_block = ""
+                if sharp_plugins_enabled:
+                    sharp_plugins_compile_block = f"""
+echo "解压 nccl-rdma-sharp-plugins.tgz..."
+if [ -f "{sharp_plugins_marker}" ]; then
+  echo "sharp 插件已编译完成，跳过"
+else
+  rm -rf /tmp/ghx/nccl-rdma-sharp-plugins
+  tar -xzf /tmp/ghx/nccl-rdma-sharp-plugins.tgz -C /tmp/ghx
+  rm -f /tmp/ghx/nccl-rdma-sharp-plugins.tgz
+  cd /tmp/ghx/nccl-rdma-sharp-plugins
+  echo "运行 autogen.sh..."
+  ./autogen.sh
+  echo "运行 configure..."
+  ./configure --with-cuda=/usr/local/cuda
+  echo "编译 nccl-rdma-sharp-plugins..."
+  make -j$(nproc) CUDA_HOME=/usr/local/cuda 2>&1 | tee /tmp/ghx/sharp_plugins_build.log
+  if [ $? -ne 0 ]; then
+    echo "错误: sharp 插件编译失败"
+    cat /tmp/ghx/sharp_plugins_build.log
+    exit 1
+  fi
+  echo "安装 sharp 插件..."
+  make install 2>&1 | tee /tmp/ghx/sharp_plugins_install.log
+  if [ $? -ne 0 ]; then
+    echo "错误: sharp 插件安装失败"
+    cat /tmp/ghx/sharp_plugins_install.log
+    exit 1
+  fi
+  touch "{sharp_plugins_marker}"
+  ldconfig || true
+fi
+"""
+
                 compile_script = f"""
 set -e
 rm -rf /tmp/ghx/nccl /tmp/ghx/nccl-tests
@@ -1626,7 +1790,7 @@ tar -xzf /tmp/ghx/nccl-tests.tgz -C /tmp/ghx
 rm -f /tmp/ghx/nccl-tests.tgz
 echo "编译 nccl-tests..."
 cd /tmp/ghx/nccl-tests
-make -j$(nproc) CUDA_HOME=/usr/local/cuda NCCL_HOME=$NCCL_HOME {mpi_params} 2>&1 | tee /tmp/nccl_tests_build.log
+make -j$(nproc) CUDA_HOME=/usr/local/cuda NCCL_HOME=$NCCL_HOME {compile_mpi_flags} 2>&1 | tee /tmp/nccl_tests_build.log
 if [ $? -ne 0 ]; then
     echo "错误: nccl-tests 编译失败"
     cat /tmp/nccl_tests_build.log
@@ -1638,6 +1802,7 @@ if [ ! -f /tmp/ghx/nccl-tests/build/all_reduce_perf ]; then
 fi
 chmod +x /tmp/ghx/nccl-tests/build/all_reduce_perf
 echo "编译完成"
+{sharp_plugins_compile_block}
 """
                 compile_result = session.run(compile_script, timeout=600, require_root=True)
                 if compile_result.exit_code != 0:
@@ -1646,6 +1811,11 @@ echo "编译完成"
                 check_res = session.run("[ -f /tmp/ghx/nccl-tests/build/all_reduce_perf ] && echo OK || echo MISSING")
                 if check_res.stdout.strip() != "OK":
                     raise RuntimeError("nccl-tests 编译后仍未找到 all_reduce_perf")
+
+                if sharp_plugins_enabled:
+                    check_plugins_res = session.run(f"[ -f {sharp_plugins_marker} ] && echo OK || echo MISSING")
+                    if check_plugins_res.stdout.strip() != "OK":
+                        raise RuntimeError("sharp 插件编译后仍未找到安装标记文件（.build_complete）")
             
             # 为所有其他节点上传源码并编译
             master_host = host_list[0]
@@ -1661,28 +1831,87 @@ echo "编译完成"
                 temp_nccl_tests_path = "/tmp/ghx/nccl-tests.tgz"
                 session.upload(nccl_tgz, temp_nccl_path)
                 session.upload(nccl_tests_tgz, temp_nccl_tests_path)
+
+                sharp_plugins_marker = "/tmp/ghx/nccl-rdma-sharp-plugins/.build_complete"
+                sharp_plugins_tgz = ASSETS.get("nccl_sharp_plugins")
+                sharp_plugins_enabled = sharp_compile_requested and sharp_plugins_tgz is not None and sharp_plugins_tgz.exists()
+                temp_sharp_plugins_path = "/tmp/ghx/nccl-rdma-sharp-plugins.tgz"
+                if sharp_plugins_enabled:
+                    session.upload(sharp_plugins_tgz, temp_sharp_plugins_path)
+                elif sharp_compile_requested and (sharp_plugins_tgz is None or not sharp_plugins_tgz.exists()):
+                    logger.warning("nccl-rdma-sharp-plugins.tgz 不存在，跳过 sharp 插件编译")
+                elif not sharp_compile_requested:
+                    logger.info("未启用 SHARP，从节点跳过 nccl-rdma-sharp-plugins 上传与编译")
                 
                 def upload_and_compile_node(host: str) -> tuple[str, bool, str]:
                     try:
-                        # 先检查节点是否已有 nccl-tests
-                        check_script = f"""
+                        # 先检查节点是否已有 nccl-tests 与 sharp 插件（如果启用）
+                        if sharp_plugins_enabled:
+                            check_script = f"""
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 {host} "[ -f /tmp/ghx/nccl-tests/build/all_reduce_perf ] && echo NCCL_OK || echo NCCL_MISSING; [ -f {sharp_plugins_marker} ] && echo PLUGINS_OK || echo PLUGINS_MISSING" 2>/dev/null || echo "MISSING"
+"""
+                        else:
+                            check_script = f"""
 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 {host} "[ -f /tmp/ghx/nccl-tests/build/all_reduce_perf ] && echo OK || echo MISSING" 2>/dev/null || echo "MISSING"
 """
                         check_result = session.run(check_script, timeout=30, require_root=True)
-                        if check_result.stdout.strip() == "OK":
-                            logger.info("节点 %s 已存在 nccl-tests，跳过编译", host)
-                            return (host, True, "")
+                        check_text = check_result.stdout.strip()
+                        if sharp_plugins_enabled:
+                            nccl_ok = "NCCL_OK" in check_text
+                            plugins_ok = "PLUGINS_OK" in check_text
+                            if nccl_ok and plugins_ok:
+                                logger.info("节点 %s 已存在 nccl-tests 与 sharp 插件，跳过编译", host)
+                                return (host, True, "")
+                        else:
+                            if check_text == "OK":
+                                logger.info("节点 %s 已存在 nccl-tests，跳过编译", host)
+                                return (host, True, "")
                         
                         logger.info("开始为节点 %s 上传源码并编译 nccl-tests", host)
+                        # 不可在外层 f""" 内再嵌套 f"""（会提前结束字符串）；拆成片段再拼接
+                        sharp_scp_fragment = (
+                            f"scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 {temp_sharp_plugins_path} {host}:/tmp/ghx/nccl-rdma-sharp-plugins.tgz || exit 1\n"
+                            if sharp_plugins_enabled
+                            else ""
+                        )
+                        sharp_remote_plugins_fragment = ""
+                        if sharp_plugins_enabled:
+                            sharp_remote_plugins_fragment = f"""
+echo "解压 nccl-rdma-sharp-plugins.tgz..."
+tar -xzf /tmp/ghx/nccl-rdma-sharp-plugins.tgz -C /tmp/ghx
+rm -f /tmp/ghx/nccl-rdma-sharp-plugins.tgz
+cd /tmp/ghx/nccl-rdma-sharp-plugins
+echo "运行 autogen.sh..."
+./autogen.sh
+echo "运行 configure..."
+./configure --with-cuda=/usr/local/cuda
+echo "编译 nccl-rdma-sharp-plugins..."
+make -j$(nproc) CUDA_HOME=/usr/local/cuda 2>&1 | tee /tmp/sharp_plugins_build.log
+if [ $? -ne 0 ]; then
+  echo "错误: sharp 插件编译失败"
+  cat /tmp/sharp_plugins_build.log
+  exit 1
+fi
+echo "安装 sharp 插件..."
+make install 2>&1 | tee /tmp/sharp_plugins_install.log
+if [ $? -ne 0 ]; then
+  echo "错误: sharp 插件安装失败"
+  cat /tmp/sharp_plugins_install.log
+  exit 1
+fi
+touch "{sharp_plugins_marker}"
+ldconfig || true
+"""
                         upload_and_compile_script = f"""
 set -e
 echo "上传源码到节点 {host}..."
 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 {host} "mkdir -p /tmp/ghx" || exit 1
 scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 {temp_nccl_path} {host}:/tmp/ghx/nccl.tgz || exit 1
 scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 {temp_nccl_tests_path} {host}:/tmp/ghx/nccl-tests.tgz || exit 1
-ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 {host} << 'REMOTE_SCRIPT'
+{sharp_scp_fragment}ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 {host} << 'REMOTE_SCRIPT'
 set -e
 rm -rf /tmp/ghx/nccl /tmp/ghx/nccl-tests
+rm -rf /tmp/ghx/nccl-rdma-sharp-plugins
 echo "解压 nccl.tgz..."
 tar -xzf /tmp/ghx/nccl.tgz -C /tmp/ghx
 rm -f /tmp/ghx/nccl.tgz
@@ -1721,7 +1950,7 @@ if [ ! -f /tmp/ghx/nccl-tests/build/all_reduce_perf ]; then
     exit 1
 fi
 chmod +x /tmp/ghx/nccl-tests/build/all_reduce_perf
-echo "节点 {host} 编译完成"
+{sharp_remote_plugins_fragment}echo "节点 {host} 编译完成"
 REMOTE_SCRIPT
 if [ $? -eq 0 ]; then
     echo "节点 {host} 编译成功"
@@ -1756,7 +1985,10 @@ fi
                             logger.exception("节点 %s 任务执行异常: %s", host, exc)
                             failed_hosts.append((host, str(exc)))
                 
-                session.run(f"rm -f {temp_nccl_path} {temp_nccl_tests_path}", require_root=True)
+                session.run(
+                    f"rm -f {temp_nccl_path} {temp_nccl_tests_path}" + (f" {temp_sharp_plugins_path}" if sharp_plugins_enabled else ""),
+                    require_root=True,
+                )
                 
                 if failed_hosts:
                     error_msg = f"以下节点编译失败: {', '.join([h for h, _ in failed_hosts])}\n请确保：\n1. SSH免密已配置\n2. 节点之间网络连通\n3. 节点有足够的编译工具"

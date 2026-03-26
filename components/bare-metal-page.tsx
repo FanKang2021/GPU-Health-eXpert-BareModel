@@ -117,7 +117,6 @@ interface JobNodeResult {
   port?: number
   gpuType?: string
   nvbandwidth?: JobMetric
-  p2p?: JobMetric
   nccl?: JobMetric
   dcgm?: JobMetric
   ib?: JobMetric
@@ -126,7 +125,7 @@ interface JobNodeResult {
   completedAt?: string
 }
 
-type BenchmarkMap = Record<string, { p2p: number; nccl: number; bw: number }>
+type BenchmarkMap = Record<string, { d2d: number; nccl: number; h2d_d2h: number }>
 
 // 动态获取API地址：优先使用环境变量，否则根据当前页面地址推断
 function normalizeBaseUrl(url: string): string {
@@ -289,14 +288,6 @@ const CHECK_ITEMS = [
     },
   },
   {
-    id: "p2p",
-    name: { zh: "p2pBandwidthLatencyTest", en: "p2pBandwidthLatencyTest" },
-    description: {
-      zh: "测试GPU间点对点通信带宽和延迟，评估多GPU协作性能",
-      en: "Test GPU peer-to-peer bandwidth and latency to gauge multi-GPU collaboration",
-    },
-  },
-  {
     id: "nccl",
     name: { zh: "NCCL测试", en: "NCCL Test" },
     description: {
@@ -323,14 +314,14 @@ const CHECK_ITEMS = [
 ]
 
 const DEFAULT_GPU_BENCHMARKS: BenchmarkMap = {
-  "RTX 3090": { p2p: 18, nccl: 7, bw: 20 },
-  L40S: { p2p: 28, nccl: 9, bw: 20 },
-  "RTX 4090": { p2p: 18, nccl: 7, bw: 20 },
-  A100: { p2p: 420, nccl: 70, bw: 20 },
-  A800: { p2p: 340, nccl: 55, bw: 20 },
-  H100: { p2p: 700, nccl: 139, bw: 40 },
-  H800: { p2p: 340, nccl: 65, bw: 47 },
-  H200: { p2p: 730, nccl: 145, bw: 54 },
+  "RTX 3090": { d2d: 18, nccl: 7, h2d_d2h: 20 },
+  L40S: { d2d: 30, nccl: 9, h2d_d2h: 20 },
+  "RTX 4090": { d2d: 18, nccl: 7, h2d_d2h: 20 },
+  A100: { d2d: 420, nccl: 70, h2d_d2h: 20 },
+  A800: { d2d: 340, nccl: 55, h2d_d2h: 20 },
+  H100: { d2d: 700, nccl: 139, h2d_d2h: 50 },
+  H800: { d2d: 340, nccl: 65, h2d_d2h: 47 },
+  H200: { d2d: 705, nccl: 145, h2d_d2h: 50 },
 }
 
 // 核心命令配置
@@ -506,7 +497,6 @@ const flattenJobNodes = (job: JobDetail): JobNodeResult[] => {
       port: node.port,
       gpuType: node.gpuType,
       nvbandwidth: node.results?.nvbandwidth,
-      p2p: node.results?.p2p,
       nccl: node.results?.nccl,
       dcgm: node.results?.dcgm,
       ib: node.results?.ib,
@@ -537,7 +527,7 @@ export default function BareMetal() {
   const [commandStatus, setCommandStatus] = useState<Record<string, CommandStatus>>(
     Object.fromEntries(CORE_COMMANDS.map((cmd) => [cmd.name, "idle"])),
   )
-  const [selectedItems, setSelectedItems] = useState<string[]>(["nvbandwidth", "p2p", "nccl", "dcgm", "ib"])
+  const [selectedItems, setSelectedItems] = useState<string[]>(["nvbandwidth", "nccl", "dcgm", "ib"])
   const [dcgmLevel, setDcgmLevel] = useState("2")
   const [isTestingSSH, setIsTestingSSH] = useState(false)
   const [isCheckingCommands, setIsCheckingCommands] = useState(false)
@@ -598,8 +588,12 @@ export default function BareMetal() {
     ncclPxnDisable: "0",
     ncclMinNchannels: "32",
     ncclNvlsEnable: "0",
-    sharpRelaxedOrdering: true,
+    ncclCrossNic: "1",
+    ucxTls: "rc,sm,cuda_copy,self",
+    ncclDebug: "SUBSYS",
+    sharpEnabled: false,
     gpuPerNode: "8",
+    allReducePerfPath: "/opt/nccl-tests/build/all_reduce_perf",
     extra: "",
   })
   const [hostfileContent, setHostfileContent] = useState("")
@@ -1433,7 +1427,12 @@ export default function BareMetal() {
       if (multiNodeConfig.ncclPxnDisable) mpiParams.nccl_pxn_disable = multiNodeConfig.ncclPxnDisable
       if (multiNodeConfig.ncclMinNchannels) mpiParams.nccl_min_nchannels = multiNodeConfig.ncclMinNchannels
       if (multiNodeConfig.ncclNvlsEnable) mpiParams.nccl_nvls_enable = multiNodeConfig.ncclNvlsEnable
-      if (multiNodeConfig.sharpRelaxedOrdering) mpiParams.sharp_relaxed_ordering = true
+      if (multiNodeConfig.ncclCrossNic) mpiParams.nccl_cross_nic = multiNodeConfig.ncclCrossNic
+      if (multiNodeConfig.ucxTls) mpiParams.ucx_tls = multiNodeConfig.ucxTls
+      if (multiNodeConfig.ncclDebug) mpiParams.nccl_debug = multiNodeConfig.ncclDebug
+      if (multiNodeConfig.sharpEnabled) mpiParams.sharp_enabled = true
+      if (multiNodeConfig.allReducePerfPath.trim())
+        mpiParams.all_reduce_perf_path = multiNodeConfig.allReducePerfPath.trim()
       if (multiNodeConfig.extra) mpiParams.extra = multiNodeConfig.extra
 
       const payload = {
@@ -2380,7 +2379,6 @@ export default function BareMetal() {
                       <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("节点地址", "Node Address")}</th>
                   <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("GPU类型", "GPU Type")}</th>
                   <th className="text-left py-3 px-4 text-slate-300 font-medium">nvBandwidthTest</th>
-                  <th className="text-left py-3 px-4 text-slate-300 font-medium">p2pBandwidthLatencyTest</th>
                   <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("NCCL测试", "NCCL Test")}</th>
                   <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("DCGM诊断", "DCGM Diagnostics")}</th>
                   <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("IB检查", "IB Check")}</th>
@@ -2412,7 +2410,6 @@ export default function BareMetal() {
                         <td className="py-3 px-4 text-white font-medium">{result.hostname || result.host}</td>
                         <td className="py-3 px-4 text-white">{result.gpuType || "Unknown"}</td>
                         <td className="py-3 px-4">{renderMetric(result.nvbandwidth, "GB/s", language)}</td>
-                        <td className="py-3 px-4">{renderMetric(result.p2p, "GB/s", language)}</td>
                         <td className="py-3 px-4">{renderMetric(result.nccl, "GB/s", language)}</td>
                       <td className="py-3 px-4">
                           {result.dcgm
@@ -2684,6 +2681,27 @@ export default function BareMetal() {
                 </div>
               </div>
 
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label className="text-xs text-slate-400">NCCL_CROSS_NIC</Label>
+                  <Input
+                    value={multiNodeConfig.ncclCrossNic}
+                    onChange={(e) => setMultiNodeConfig(prev => ({ ...prev, ncclCrossNic: e.target.value }))}
+                    placeholder="1"
+                    className="bg-slate-800/50 border-slate-700 text-white text-sm h-8"
+                  />
+                </div>
+                <div>
+                  <Label className="text-xs text-slate-400">UCX_TLS</Label>
+                  <Input
+                    value={multiNodeConfig.ucxTls}
+                    onChange={(e) => setMultiNodeConfig(prev => ({ ...prev, ucxTls: e.target.value }))}
+                    placeholder="rc,sm,cuda_copy,self"
+                    className="bg-slate-800/50 border-slate-700 text-white text-sm h-8"
+                  />
+                </div>
+              </div>
+
               <div className="grid grid-cols-4 gap-2">
                 <div>
                   <Label className="text-xs text-slate-400">IB_QPS</Label>
@@ -2725,21 +2743,46 @@ export default function BareMetal() {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
+                  <Label className="text-xs text-slate-400">NCCL_DEBUG</Label>
+                  <Input
+                    value={multiNodeConfig.ncclDebug}
+                    onChange={(e) => setMultiNodeConfig(prev => ({ ...prev, ncclDebug: e.target.value }))}
+                    placeholder="SUBSYS"
+                    className="bg-slate-800/50 border-slate-700 text-white text-sm h-8"
+                  />
+                </div>
+                <div>
+                  <Label className="text-xs text-slate-400">
+                    {tr("all_reduce_perf 路径", "all_reduce_perf path")}
+                  </Label>
+                  <Input
+                    value={multiNodeConfig.allReducePerfPath}
+                    onChange={(e) => setMultiNodeConfig(prev => ({ ...prev, allReducePerfPath: e.target.value }))}
+                    placeholder="/opt/nccl-tests/build/all_reduce_perf"
+                    className="bg-slate-800/50 border-slate-700 text-white text-sm h-8"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
                   <Label className="text-xs text-slate-400">{tr("额外参数", "Extra Parameters")}</Label>
                   <Input
                     value={multiNodeConfig.extra}
                     onChange={(e) => setMultiNodeConfig(prev => ({ ...prev, extra: e.target.value }))}
-                    placeholder="-x NCCL_DEBUG=INFO"
+                    placeholder=""
                     className="bg-slate-800/50 border-slate-700 text-white text-sm h-8"
                   />
                 </div>
                 <div className="flex items-end pb-1">
                   <label className="flex items-center gap-2 cursor-pointer">
                     <Checkbox
-                      checked={multiNodeConfig.sharpRelaxedOrdering}
-                      onCheckedChange={(checked) => setMultiNodeConfig(prev => ({ ...prev, sharpRelaxedOrdering: !!checked }))}
+                      checked={multiNodeConfig.sharpEnabled}
+                      onCheckedChange={(checked) => setMultiNodeConfig(prev => ({ ...prev, sharpEnabled: !!checked }))}
                     />
-                    <span className="text-xs text-slate-400">SHARP_RELAXED_ORDERING</span>
+                    <span className="text-xs text-slate-400">
+                      {tr("启用 SHARP（SHARP_COLL / COLLNET）", "Enable SHARP (SHARP_COLL / COLLNET)")}
+                    </span>
                   </label>
                 </div>
               </div>
@@ -2908,18 +2951,18 @@ export default function BareMetal() {
               <thead>
                 <tr className="border-b border-slate-700">
                   <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("GPU型号", "GPU Model")}</th>
-                  <th className="text-left py-3 px-4 text-slate-300 font-medium">P2P (GB/s)</th>
+                  <th className="text-left py-3 px-4 text-slate-300 font-medium">D2D (GB/s)</th>
                   <th className="text-left py-3 px-4 text-slate-300 font-medium">NCCL (GB/s)</th>
-                  <th className="text-left py-3 px-4 text-slate-300 font-medium">BW (GB/s)</th>
+                  <th className="text-left py-3 px-4 text-slate-300 font-medium">H2D/D2H (GB/s)</th>
                 </tr>
               </thead>
               <tbody>
                 {benchmarkEntries.map(([model, values]) => (
                   <tr key={model} className="border-b border-slate-800">
                     <td className="py-3 px-4 text-white font-medium">{model}</td>
-                    <td className="py-3 px-4 text-slate-300">{values.p2p}</td>
+                    <td className="py-3 px-4 text-slate-300">{values.d2d}</td>
                     <td className="py-3 px-4 text-slate-300">{values.nccl}</td>
-                    <td className="py-3 px-4 text-slate-300">{values.bw}</td>
+                    <td className="py-3 px-4 text-slate-300">{values.h2d_d2h}</td>
                   </tr>
                 ))}
               </tbody>

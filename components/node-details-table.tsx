@@ -82,7 +82,7 @@ export function NodeDetailsTable({
   }: {
     value: string
     gpuType: string
-    testType: "bw" | "p2p" | "nccl"
+    testType: "h2d_d2h" | "nccl"
   }) => {
     const benchmark = gpuBenchmarks[gpuType as keyof typeof gpuBenchmarks]
     if (!benchmark) return <span className="text-foreground">{value}</span>
@@ -122,13 +122,7 @@ export function NodeDetailsTable({
     
     // 检查带宽测试
     const bandwidthValue = parseValue(item.nvbandwidthTest)
-    if (bandwidthValue < benchmark.bw) {
-      return 'No Pass'
-    }
-    
-    // 检查P2P测试
-    const p2pValue = parseValue(item.p2pBandwidthLatencyTest)
-    if (p2pValue < benchmark.p2p) {
+    if (bandwidthValue < benchmark.h2d_d2h) {
       return 'No Pass'
     }
     
@@ -352,9 +346,6 @@ export function NodeDetailsTable({
                 <TableHead className="text-tech-blue font-semibold">{t.hostName}</TableHead>
                 <TableHead className="text-tech-green font-semibold">{t.gpuType}</TableHead>
                 <TableHead className="text-tech-yellow font-semibold">nvBandwidthTest</TableHead>
-                <TableHead className="text-tech-orange font-semibold">
-                  p2pBandwidthLatencyTest
-                </TableHead>
                 <TableHead className="text-tech-purple font-semibold">{t.ncclTest}</TableHead>
                 <TableHead className="text-tech-cyan font-semibold">{t.dcgmDiagnostic}</TableHead>
                 <TableHead className="text-tech-blue font-semibold">{t.ibCheck}</TableHead>
@@ -388,7 +379,7 @@ export function NodeDetailsTable({
             <TableBody>
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={10} className="text-center py-8">
+                  <TableCell colSpan={9} className="text-center py-8">
                     <div className="flex items-center justify-center">
                       <RefreshCw className="w-6 h-6 animate-spin mr-2" />
                       {t.loading}
@@ -397,7 +388,7 @@ export function NodeDetailsTable({
                 </TableRow>
               ) : paginatedData.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={10} className="text-center py-8 text-muted-foreground">
+                  <TableCell colSpan={9} className="text-center py-8 text-muted-foreground">
                     {t.noData}
                   </TableCell>
                 </TableRow>
@@ -412,10 +403,7 @@ export function NodeDetailsTable({
                     </TableCell>
                     <TableCell className="text-foreground">{item.gpuType}</TableCell>
                     <TableCell>
-                      <PerformanceCell value={item.nvbandwidthTest} gpuType={item.gpuType} testType="bw" />
-                    </TableCell>
-                    <TableCell>
-                      <PerformanceCell value={item.p2pBandwidthLatencyTest} gpuType={item.gpuType} testType="p2p" />
+                      <PerformanceCell value={item.nvbandwidthTest} gpuType={item.gpuType} testType="h2d_d2h" />
                     </TableCell>
                     <TableCell>
                       <PerformanceCell value={item.ncclTests} gpuType={item.gpuType} testType="nccl" />

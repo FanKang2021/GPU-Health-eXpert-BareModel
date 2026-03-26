@@ -3,7 +3,7 @@
 这个仓库提供了一个通过 **SSH** 在裸金属服务器上执行 GPU 健康检查的完整方案。整体由两部分组成：
 
 1. **前端（Next.js）**：交互式控制台，可配置 SSH、批量管理节点、创建任务、实时查看结果及日志。
-2. **后端（Flask + Paramiko）**：负责通过 SSH 上传工具、执行 `nvbandwidth` / `p2pBandwidthLatencyTest` / `nccl-tests` / `dcgmi` / `ibstat`，并对结果进行解析比对。
+2. **后端（Flask + Paramiko）**：负责通过 SSH 上传工具、执行 `nvbandwidth` / `nccl-tests` / `dcgmi` / `ibstat`，并对结果进行解析比对。
 
 ---
 
@@ -23,9 +23,10 @@
 ## 核心特性
 
 - 通过 SSH 直接接入裸金属主机，类似 Ansible 的分发执行方式。
-- 自动上传 `nvbandwidth`、`p2pBandwidthLatencyTest`、`nccl.tgz`、`nccl-tests.tgz` 等依赖，在目标节点 `/tmp/ghx` 目录下解压并编译后使用。
+- 自动上传 `nvbandwidth`、`nccl.tgz`、`nccl-tests.tgz` 等依赖，在目标节点 `/tmp/ghx` 目录下解压并编译后使用；带宽项依次执行 `nvbandwidth -t 2/3/6/7`（H2D、D2H、GPU 间双向 D2D read/write CE）。
 - 支持多节点批量任务、实时进度查看、日志下载。
 - 提供 GPU 基准值判定，自动给出通过/失败结论。
+- 多机 NCCL（`mpirun`）：默认 TCP/NCCL 套接字网卡为 `bond0`，支持 `NCCL_CROSS_NIC`、`UCX_TLS`、`NCCL_DEBUG` 等；**SHARP** 由前端勾选统一开启（注入 `SHARP_COLL_ENABLE`、`SHARP_LOG_LEVEL`、`NCCL_COLLNET_ENABLE`）。**仅勾选 SHARP 时**才会上传并编译 `nccl-rdma-sharp-plugins`（需仓库提供 `nccl-rdma-sharp-plugins.tgz`），未勾选可显著缩短多机首次编译时间。默认可执行文件路径为 `/opt/nccl-tests/build/all_reduce_perf`；若使用本工具在节点上编译的 `nccl-tests`，请在界面中改为 `/tmp/ghx/nccl-tests/build/all_reduce_perf`。
 - 纯前后端解耦，前端通过 REST API 调用后端，可按需扩展。
 
 ---
@@ -46,7 +47,6 @@
 后端需要能够访问以下文件（仓库已提供）：
 
 - `nvbandwidth`
-- `p2pBandwidthLatencyTest`
 - `nccl.tgz`（NCCL 源码压缩包，将在目标节点编译）
 - `nccl-tests.tgz`（NCCL Tests 源码压缩包，将在目标节点编译）
 
@@ -63,12 +63,22 @@
 此方式适合快速打包交付。下面示例使用多容器方案（可根据实际拆/并）：
 
 ```bash
-# 1. 构建前端镜像
-docker build -f Dockerfile.ghx-dashboard -t ghx-frontend .
+# 建议启用 BuildKit（消除 legacy builder 提示，缓存更合理）
+# Windows PowerShell: $env:DOCKER_BUILDKIT=1
+# Linux/macOS: export DOCKER_BUILDKIT=1
+
+# 1. 构建前端镜像（可按需覆盖 DNS / registry）
+docker build -f Dockerfile.ghx-dashboard -t ghx-frontend \
+  --build-arg NPM_REGISTRY=https://registry.npmmirror.com \
+  --build-arg BUILD_DNS1=223.5.5.5 \
+  --build-arg BUILD_DNS2=114.114.114.114 \
+  .
 
 # 2. 构建后端镜像
 docker build -f Dockerfile.ghx-backend -t ghx-baremetal-backend .
 ```
+
+> **构建期 `getaddrinfo EAI_AGAIN registry.npmmirror.com`**：多为容器 DNS。本仓库在安装依赖的同一 `RUN` 内写入国内公共 DNS，并重试/降并发。仍失败可：① `NPM_REGISTRY` 改为 `https://mirrors.cloud.tencent.com/npm/`；② 在 Docker Desktop 的 daemon.json 配置 `"dns": ["223.5.5.5","114.114.114.114"]`；③ Linux 可试 `docker build --network=host`。根布局使用 **geist** 本地字体，不访问 `fonts.googleapis.com`。
 
 #### 使用 docker-compose
 
@@ -154,7 +164,7 @@ ghx-bare/
 ├── baremetal_server.py         # Flask 后端入口
 ├── requirements.txt            # Python 依赖
 ├── Dockerfile.ghx-dashboard    # 前端 Dockerfile
-├── nvbandwidth / p2pBandwidthLatencyTest / nccl*.tgz  # 执行所需资产
+├── nvbandwidth / nccl*.tgz  # 执行所需资产
 └── README.md                   # 本文件
 ```
 

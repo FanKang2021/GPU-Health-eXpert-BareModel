@@ -11,7 +11,6 @@ services:
     volumes:
       # 挂载资产文件（可选，如果镜像中已包含则无需挂载）
       - ./nvbandwidth:/app/nvbandwidth:ro
-      - ./p2pBandwidthLatencyTest:/app/p2pBandwidthLatencyTest:ro
       - ./nccl-tests.tgz:/app/nccl-tests.tgz:ro
       # 挂载GPU基准值配置文件（支持热更新）
       - ./config/gpu-benchmarks.json:/app/config/gpu-benchmarks.json:ro
@@ -20,6 +19,15 @@ services:
     restart: unless-stopped
 
   frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.ghx-dashboard
+      args:
+        NPM_REGISTRY: https://registry.npmmirror.com
+        # 构建仍解析失败时可换腾讯云： https://mirrors.cloud.tencent.com/npm/
+        BUILD_DNS1: "223.5.5.5"
+        BUILD_DNS2: "114.114.114.114"
+        BUILD_DNS3: "119.29.29.29"
     image: ghx-frontend
     container_name: ghx-frontend
     environment:

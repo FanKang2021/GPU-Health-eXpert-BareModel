@@ -18,15 +18,15 @@ interface DashboardContentProps {
 
 // GPU基准值配置
 const defaultGpuBenchmarks = {
-  "RTX 3090": { p2p: 18, nccl: 7, bw: 20 },
-  L40S: { p2p: 28, nccl: 9, bw: 20 },
-  "RTX 4090": { p2p: 18, nccl: 7, bw: 20 },
-  A100: { p2p: 420, nccl: 70, bw: 20 },
-  A800: { p2p: 340, nccl: 55, bw: 20 },
-  H100: { p2p: 700, nccl: 139, bw: 40 },
-  H800: { p2p: 340, nccl: 65, bw: 47 },
-  H20: { p2p: 700, nccl: 139, bw: 47 },
-  H200: { p2p: 730, nccl: 145, bw: 54 },
+  "RTX 3090": { d2d: 18, nccl: 7, h2d_d2h: 20 },
+  L40S: { d2d: 30, nccl: 9, h2d_d2h: 20 },
+  "RTX 4090": { d2d: 18, nccl: 7, h2d_d2h: 20 },
+  A100: { d2d: 420, nccl: 70, h2d_d2h: 20 },
+  A800: { d2d: 340, nccl: 55, h2d_d2h: 20 },
+  H100: { d2d: 700, nccl: 139, h2d_d2h: 50 },
+  H800: { d2d: 340, nccl: 65, h2d_d2h: 47 },
+  H20: { d2d: 700, nccl: 139, h2d_d2h: 47 },
+  H200: { d2d: 705, nccl: 145, h2d_d2h: 50 },
 }
 
 // 示例数据 - 作为fallback使用
@@ -35,7 +35,6 @@ const mockData = [
     hostname: "gpu-node-001",
     gpuType: "H200",
     nvbandwidthTest: "54.9 GB/s",
-    p2pBandwidthLatencyTest: "736.40 GB/s",
     ncclTests: "150.946 GB/s",
     dcgmDiag: "Pass",
     ibCheck: "Pass",
@@ -71,7 +70,6 @@ export function DashboardContent({ language, t }: DashboardContentProps) {
       nodeName: result.nodeName || result.hostname || 'Unknown',
       gpuType: result.gpuType || 'Unknown',
       nvbandwidthTest: result.nvbandwidthTest || 'N/A',
-      p2pBandwidthLatencyTest: result.p2pBandwidthLatencyTest || 'N/A',
       ncclTests: result.ncclTests || 'N/A',
       dcgmDiag: result.dcgmDiag || 'N/A',
       ibCheck: result.ibCheck || 'N/A',
@@ -361,7 +359,6 @@ GPU类型: ${log.gpuType || 'N/A'}
 
 === 性能测试结果 ===
 内存拷贝带宽测试: ${log.nvbandwidthTest || 'N/A'}
-P2P带宽延迟测试: ${log.p2pBandwidthLatencyTest || 'N/A'}
 NCCL测试: ${log.ncclTests || 'N/A'}
 DCGM诊断: ${log.dcgmDiag || 'N/A'}
 IB检查: ${log.ibCheck || 'N/A'}
@@ -411,7 +408,6 @@ GPU类型: ${log.gpuType || 'N/A'}
 
 === 性能测试结果 ===
 内存拷贝带宽测试: ${log.nvbandwidthTest || 'N/A'}
-P2P带宽延迟测试: ${log.p2pBandwidthLatencyTest || 'N/A'}
 NCCL测试: ${log.ncclTests || 'N/A'}
 DCGM诊断: ${log.dcgmDiag || 'N/A'}
 IB检查: ${log.ibCheck || 'N/A'}
@@ -471,7 +467,6 @@ GPU类型: ${log.gpuType || 'N/A'}
 
 === 性能测试结果 ===
 内存拷贝带宽测试: ${log.nvbandwidthTest || 'N/A'}
-P2P带宽延迟测试: ${log.p2pBandwidthLatencyTest || 'N/A'}
 NCCL测试: ${log.ncclTests || 'N/A'}
 DCGM诊断: ${log.dcgmDiag || 'N/A'}
 IB检查: ${log.ibCheck || 'N/A'}
@@ -563,9 +558,6 @@ ${log.executionLog || '无日志'}
           <div className="space-y-4 text-sm text-foreground">
             <div>
               <strong>nvbandwidthTest:</strong> {t.nvbandwidthTestDesc}
-            </div>
-            <div>
-              <strong>p2pBandwidthLatencyTest:</strong> {t.p2pTestDesc}
             </div>
             <div>
               <strong>{t.ncclTest}:</strong> {t.ncclTestDesc}
@@ -714,13 +706,13 @@ ${log.executionLog || '无日志'}
                     {t.gpuModel}
                   </TableHead>
                   <TableHead className="font-semibold text-center text-tech-green">
-                    P2PBandwidthLatencyTest
+                    D2D (GB/s)
                   </TableHead>
                   <TableHead className="font-semibold text-center text-tech-yellow">
                     NCCL_Tests
                   </TableHead>
                   <TableHead className="font-semibold text-center text-tech-orange">
-                    nvBandwidthTest
+                    H2D/D2H (GB/s)
                   </TableHead>
                 </TableRow>
               </TableHeader>
@@ -739,9 +731,9 @@ ${log.executionLog || '无日志'}
                       <TableCell className="font-bold text-center text-foreground">
                         {gpuType}
                       </TableCell>
-                      <TableCell className="text-center font-mono text-tech-green font-semibold">{benchmark.p2p}</TableCell>
+                      <TableCell className="text-center font-mono text-tech-green font-semibold">{benchmark.d2d}</TableCell>
                       <TableCell className="text-center font-mono text-tech-yellow font-semibold">{benchmark.nccl}</TableCell>
-                      <TableCell className="text-center font-mono text-tech-orange font-semibold">{benchmark.bw}</TableCell>
+                      <TableCell className="text-center font-mono text-tech-orange font-semibold">{benchmark.h2d_d2h}</TableCell>
                     </TableRow>
                   )
                 })}

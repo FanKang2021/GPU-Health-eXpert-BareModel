@@ -1,17 +1,60 @@
-# Frontend Dockerfile
+# syntax=docker/dockerfile:1
+# Frontend：geist 本地字体，构建期不访问 Google Fonts。
+# EAI_AGAIN / getaddrinfo：多为构建容器 DNS 不稳定。本文件在安装依赖的「同一条 RUN」里重写 resolv.conf（每步 RUN 新容器会重新注入 DNS，必须在执行 pnpm 的同一层内生效）。
+# 仍失败时可：docker compose build --build-arg NPM_REGISTRY=https://mirrors.cloud.tencent.com/npm/
+# 或 Docker Desktop → Settings → Docker Engine → "dns": ["223.5.5.5","114.114.114.114"]
+# 建议启用 BuildKit：set DOCKER_BUILDKIT=1（Windows PowerShell: $env:DOCKER_BUILDKIT=1）
 FROM node:18-alpine AS base
 
 FROM base AS deps
-RUN apk add --no-cache curl libc6-compat
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+ARG BUILD_DNS1=223.5.5.5
+ARG BUILD_DNS2=223.6.6.6
+ENV NPM_CONFIG_REGISTRY=${NPM_REGISTRY} \
+    NODE_OPTIONS=--dns-result-order=ipv4first
+
 WORKDIR /app
 COPY package.json pnpm-lock.yaml* ./
-RUN npm install -g pnpm && \
-    pnpm config set registry https://registry.npmmirror.com && \
-    pnpm install --no-frozen-lockfile && \
-    pnpm add jszip@^3.10.1
+
+# apk 与 pnpm 须在同一条 RUN 内先写 resolv.conf，否则本层仍走 Docker 默认 DNS，易卡在 dl-cdn.alpinelinux.org
+# “temporary error” 一般是网络/DNS，拉长 npm 超时无解，需先保证能解析 apk 源
+RUN printf '%s\n' \
+      "nameserver ${BUILD_DNS1}" \
+      "nameserver ${BUILD_DNS2}" \
+      > /etc/resolv.conf \
+    && apk add --no-cache libc6-compat ca-certificates \
+    && npm config set registry "${NPM_REGISTRY}" \
+    && npm config set fetch-retries 20 \
+    && npm config set fetch-retry-mintimeout 20000 \
+    && npm config set fetch-retry-maxtimeout 180000 \
+    && npm install -g pnpm@9 \
+    && pnpm config set registry "${NPM_REGISTRY}" \
+    && pnpm config set fetch-retries 20 \
+    && pnpm config set fetch-retry-mintimeout 20000 \
+    && pnpm config set fetch-retry-maxtimeout 180000 \
+    && pnpm config set network-concurrency 2 \
+    && pnpm install --no-frozen-lockfile \
+    && pnpm add jszip@^3.10.1
 
 FROM base AS builder
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+ARG BUILD_DNS1=223.5.5.5
+ARG BUILD_DNS2=223.6.6.6
+ENV NPM_CONFIG_REGISTRY=${NPM_REGISTRY} \
+    NODE_OPTIONS=--dns-result-order=ipv4first
+
 WORKDIR /app
+RUN printf '%s\n' \
+      "nameserver ${BUILD_DNS1}" \
+      "nameserver ${BUILD_DNS2}" \
+      > /etc/resolv.conf \
+    && npm config set registry "${NPM_REGISTRY}" \
+    && npm config set fetch-retries 20 \
+    && npm install -g pnpm@9 \
+    && pnpm config set registry "${NPM_REGISTRY}" \
+    && pnpm config set fetch-retries 20 \
+    && pnpm config set network-concurrency 2
+
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json pnpm-lock.yaml* ./
 COPY next.config.mjs tsconfig.json postcss.config.mjs tailwind.config.js ./
@@ -23,43 +66,34 @@ COPY lib ./lib
 COPY hooks ./hooks
 COPY config ./config
 
-# Next.js collects completely anonymous telemetry data about general usage.
-# Learn more here: https://nextjs.org/telemetry
-# Uncomment the following line in case you want to disable telemetry during the build.
-ENV NEXT_TELEMETRY_DISABLED 1
+ENV NEXT_TELEMETRY_DISABLED=1
 
-RUN npm run build
+RUN printf '%s\n' \
+      "nameserver ${BUILD_DNS1}" \
+      "nameserver ${BUILD_DNS2}" \
+      > /etc/resolv.conf \
+    && pnpm run build
 
-# Production image, copy all the files and run next
 FROM base AS runner
 WORKDIR /app
 
-ENV NODE_ENV production
-# Uncomment the following line in case you want to disable telemetry during runtime.
-ENV NEXT_TELEMETRY_DISABLED 1
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
 
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 nextjs
+RUN addgroup --system --gid 1001 nodejs \
+    && adduser --system --uid 1001 nextjs
 
 COPY --from=builder /app/public ./public
 
-# Set the correct permission for prerender cache
-RUN mkdir .next
-RUN chown nextjs:nodejs .next
+RUN mkdir .next && chown nextjs:nodejs .next
 
-# Automatically leverage output traces to reduce image size
-# https://nextjs.org/docs/advanced-features/output-file-tracing
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
 USER nextjs
 
 EXPOSE 3000
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
 
-ENV PORT 3000
-# set hostname to localhost
-ENV HOSTNAME "0.0.0.0"
-
-# server.js is created by next build from the standalone output
-# https://nextjs.org/docs/pages/api-reference/next-config-js/output
 CMD ["node", "server.js"]

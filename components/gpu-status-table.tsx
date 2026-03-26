@@ -112,11 +112,10 @@ export function GpuStatusTable({
     }
     
     // 旧格式：节点检查详情
-    if (node.nvbandwidthTest && node.p2pBandwidthLatencyTest && node.ncclTests) {
+    if (node.nvbandwidthTest && node.ncclTests) {
       // 检查所有测试是否通过
       const tests = [
         node.nvbandwidthTest,
-        node.p2pBandwidthLatencyTest,
         node.ncclTests,
         node.dcgmDiag,
         node.ibCheck
