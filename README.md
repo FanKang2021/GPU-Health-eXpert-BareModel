@@ -26,7 +26,7 @@
 - 自动上传 `nvbandwidth`、`nccl.tgz`、`nccl-tests.tgz` 等依赖，在目标节点 `/tmp/ghx` 目录下解压并编译后使用；带宽项依次执行 `nvbandwidth -t 2/3/6/7`（H2D、D2H、GPU 间双向 D2D read/write CE）。
 - 支持多节点批量任务、实时进度查看、日志下载。
 - 提供 GPU 基准值判定，自动给出通过/失败结论。
-- 多机 NCCL（`mpirun`）：默认 TCP/NCCL 套接字网卡为 `bond0`，支持 `NCCL_CROSS_NIC`、`UCX_TLS`、`NCCL_DEBUG` 等；**SHARP** 由前端勾选统一开启（注入 `SHARP_COLL_ENABLE`、`SHARP_LOG_LEVEL`、`NCCL_COLLNET_ENABLE`）。**仅勾选 SHARP 时**才会上传并编译 `nccl-rdma-sharp-plugins`（需仓库提供 `nccl-rdma-sharp-plugins.tgz`），未勾选可显著缩短多机首次编译时间。默认可执行文件路径为 `/opt/nccl-tests/build/all_reduce_perf`；若使用本工具在节点上编译的 `nccl-tests`，请在界面中改为 `/tmp/ghx/nccl-tests/build/all_reduce_perf`。
+- 多机 NCCL（`mpirun`）：默认 TCP/NCCL 套接字网卡为 `bond0`，支持 `NCCL_CROSS_NIC`、`UCX_TLS`、`NCCL_DEBUG` 等；**SHARP** 由前端勾选统一开启（注入 `SHARP_COLL_ENABLE`、`SHARP_LOG_LEVEL`、`NCCL_COLLNET_ENABLE`）。**仅勾选 SHARP 时**才会上传并编译 `nccl-rdma-sharp-plugins`（需仓库提供 `nccl-rdma-sharp-plugins.tgz`），未勾选可显著缩短多机首次编译时间。若先前未勾选 SHARP 已在各节点编好 `nccl`/`nccl-tests`，后续再勾选时检测到**仅缺插件**：主节点与从节点只分发、编译 SHARP 插件，**不会**删除重建已有 `nccl`/`nccl-tests`。多机 `mpirun` 默认可执行文件路径为 `/tmp/ghx/nccl-tests/build/all_reduce_perf`（与本工具上传编译目录一致）；若各节点已预装至 `/opt`，请在界面中改为 `/opt/nccl-tests/build/all_reduce_perf`。
 - 纯前后端解耦，前端通过 REST API 调用后端，可按需扩展。
 
 ---
@@ -50,7 +50,7 @@
 - `nccl.tgz`（NCCL 源码压缩包，将在目标节点编译）
 - `nccl-tests.tgz`（NCCL Tests 源码压缩包，将在目标节点编译）
 
-所有文件将上传到目标节点的 `/tmp/ghx` 目录，`nccl` 和 `nccl-tests` 会在目标节点解压并编译（支持多节点并发编译以节省时间）。
+所有文件将上传到目标节点的 `/tmp/ghx` 目录，`nccl` 和 `nccl-tests` 会在目标节点解压并编译；多机场景下从主节点向其余节点为**串行**分发编译，以避免单 SSH 连接上并发会话过多触发 `ChannelException`。
 
 若放在其他目录，可通过环境变量 `GHX_ASSET_DIR` 指定并挂载到容器或运行目录。
 
@@ -172,6 +172,9 @@ ghx-bare/
 
 ## 调试与日志
 
+- 多机 NCCL：远端命令在 `set -u` 下执行；若曾出现 `LD_LIBRARY_PATH: unbound variable`，后端已改为先 `export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"` 再调用 `mpirun -x LD_LIBRARY_PATH`。
+- SHARP 插件：解压包内脚本可能无执行位，构建使用 `bash autogen.sh` / `bash ./configure`，避免 `./autogen.sh: Permission denied`。
+- nvbandwidth：H2D/D2H 与 GPU D2D 使用不同矩阵解析；前端结果表分两行展示并分别对照 `config/gpu-benchmarks.json` 中的 `h2d_d2h` 与 `d2d`。
 - 后端默认输出到标准输出，可自行接入 `gunicorn` 或 supervisor。
 - 前端建议使用 `pnpm dev` 进行实时调试。
 - 若 `next lint` 出现 “Converting circular structure to JSON”，请升级 `next`/`eslint-config-next` 或根据具体报错调整 `.eslintrc`。

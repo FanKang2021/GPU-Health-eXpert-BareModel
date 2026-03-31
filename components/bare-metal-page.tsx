@@ -13,6 +13,7 @@ import {
   AlertCircle,
   AlertTriangle,
   CheckCircle2,
+  Copy,
   Eye,
   EyeOff,
   FileText,
@@ -83,6 +84,16 @@ interface SelectedNode {
   internalIp?: string  // 内网IP，用于mpirun
 }
 
+interface NvbandwidthMetricDetails {
+  h2d?: number
+  d2h?: number
+  d2d?: number
+  benchmark_h2d_d2h?: number
+  benchmark_d2d?: number
+  passed_h2d_d2h?: boolean
+  passed_d2d?: boolean
+}
+
 interface JobMetric {
   status?: string
   value?: number
@@ -90,6 +101,7 @@ interface JobMetric {
   benchmark?: number
   passed?: boolean
   message?: string
+  details?: NvbandwidthMetricDetails
 }
 
 interface JobNodeStatus {
@@ -408,6 +420,57 @@ const STATUS_LABELS = {
   en: { passed: "Passed", running: "Running", failed: "Abnormal", cancelled: "Cancelled", cancelling: "Cancelling" },
 }
 
+const renderNvbandwidthMetric = (metric?: JobMetric, unitHint = "GB/s", lang: "zh" | "en" = "zh") => {
+  const labels = METRIC_LABELS[lang]
+  if (!metric) {
+    return <span className="text-slate-500 text-xs">{labels.notRun}</span>
+  }
+  if (metric.status === "error") {
+    return <span className="text-red-400 text-xs">{metric.message || labels.error}</span>
+  }
+  if (metric.status === "skipped") {
+    return <span className="text-slate-400 text-xs">{labels.skipped}</span>
+  }
+  const d = metric.details
+  const unit = metric.unit || unitHint
+  if (!d || typeof d.d2d !== "number") {
+    return renderMetric(metric, unitHint, lang)
+  }
+  const h2d = d.h2d ?? 0
+  const d2h = d.d2h ?? 0
+  const floorH = Math.min(h2d, d2h)
+  const d2d = d.d2d
+  const bh = d.benchmark_h2d_d2h ?? metric.benchmark
+  const bd = d.benchmark_d2d
+  const ph =
+    d.passed_h2d_d2h !== undefined ? d.passed_h2d_d2h : bh == null || (h2d >= bh && d2h >= bh)
+  const pd = d.passed_d2d !== undefined ? d.passed_d2d : bd == null || d2d >= bd
+
+  const line = (label: string, v: number, bench: number | undefined, ok: boolean) => (
+    <div key={label} className="flex flex-col gap-0.5">
+      <div className="flex items-center gap-1 flex-wrap">
+        <span className="text-slate-400 text-[10px] uppercase">{label}</span>
+        <span className="text-white text-xs">
+          {v.toFixed(1)} {unit}
+        </span>
+        {ok ? <CheckCircle2 className="w-3.5 h-3.5 text-green-400" /> : <XCircle className="w-3.5 h-3.5 text-red-400" />}
+      </div>
+      {bench != null && (
+        <span className="text-[10px] text-slate-500 pl-0">
+          {labels.benchmark}: {bench} {unit}
+        </span>
+      )}
+    </div>
+  )
+
+  return (
+    <div className="flex flex-col gap-2 min-w-[8rem]">
+      {line(lang === "zh" ? "PCIe H2D/D2H" : "PCIe H2D/D2H", floorH, bh, ph)}
+      {line(lang === "zh" ? "GPU D2D" : "GPU D2D", d2d, bd, pd)}
+    </div>
+  )
+}
+
 const renderMetric = (metric?: JobMetric, unitHint = "GB/s", lang: "zh" | "en" = "zh") => {
   const labels = METRIC_LABELS[lang]
   if (!metric) {
@@ -585,15 +648,12 @@ export default function BareMetal() {
     ncclIbHca: "",
     ucxNetDevices: "",
     ncclIbQps: "8",
-    ncclPxnDisable: "0",
-    ncclMinNchannels: "32",
-    ncclNvlsEnable: "0",
     ncclCrossNic: "1",
     ucxTls: "rc,sm,cuda_copy,self",
     ncclDebug: "SUBSYS",
     sharpEnabled: false,
     gpuPerNode: "8",
-    allReducePerfPath: "/opt/nccl-tests/build/all_reduce_perf",
+    allReducePerfPath: "/tmp/ghx/nccl-tests/build/all_reduce_perf",
     extra: "",
   })
   const [hostfileContent, setHostfileContent] = useState("")
@@ -608,6 +668,8 @@ export default function BareMetal() {
     stderr?: string
     bandwidth?: number
     passed?: boolean
+    /** 后端异常（编译/mpirun 失败等），与 result 正文区分 */
+    error?: string
   } | null>(null)
   
   // 批量SSH测试状态
@@ -1082,27 +1144,18 @@ export default function BareMetal() {
     })
   }
 
-  const handleSelectAll = () => {
-    const paginatedNodes = selectedNodes.slice((currentPage - 1) * pageSize, currentPage * pageSize)
-    const allSelected = paginatedNodes.every((node) => selectedNodeIds.has(node.id))
-    setSelectedNodeIds((prev) => {
-      const next = new Set(prev)
-      if (allSelected) {
-        // 取消全选当前页
-        paginatedNodes.forEach((node) => next.delete(node.id))
-      } else {
-        // 全选当前页
-        paginatedNodes.forEach((node) => next.add(node.id))
-    }
-      return next
-    })
-  }
-
   // 分页计算
   const totalPages = Math.ceil(selectedNodes.length / pageSize)
   const paginatedNodes = selectedNodes.slice((currentPage - 1) * pageSize, currentPage * pageSize)
-  const currentPageAllSelected =
-    paginatedNodes.length > 0 && paginatedNodes.every((node) => selectedNodeIds.has(node.id))
+  /** 表头全选：跨所有分页，与「仅当前页」区分 */
+  const allNodesGloballySelected =
+    selectedNodes.length > 0 && selectedNodes.every((node) => selectedNodeIds.has(node.id))
+  const someNodesSelected = selectedNodes.some((node) => selectedNodeIds.has(node.id))
+  const pendingNodesHeaderCheckboxState: boolean | "indeterminate" = allNodesGloballySelected
+    ? true
+    : someNodesSelected
+      ? "indeterminate"
+      : false
 
   // 测试结果分页计算
   const resultsTotalPages = Math.ceil(testResults.length / resultsPageSize)
@@ -1110,6 +1163,14 @@ export default function BareMetal() {
     (resultsPage - 1) * resultsPageSize,
     resultsPage * resultsPageSize,
   )
+  const allResultsGloballySelected =
+    testResults.length > 0 && testResults.every((item) => selectedResultIds.has(item.id))
+  const someResultsSelected = testResults.some((item) => selectedResultIds.has(item.id))
+  const resultsHeaderCheckboxState: boolean | "indeterminate" = allResultsGloballySelected
+    ? true
+    : someResultsSelected
+      ? "indeterminate"
+      : false
 
   const formatLogTimestamp = (value?: string) => {
     if (!value) return "--"
@@ -1366,6 +1427,37 @@ export default function BareMetal() {
     }
   }
 
+  /** 组装多机 NCCL 完整文本，供复制 / 导出 */
+  const buildMultiNodeReportText = () => {
+    if (!multiNodeResult) return ""
+    const r = multiNodeResult
+    const blocks: string[] = ["=== GHealthX Multi-Node NCCL ==="]
+    if (r.error) blocks.push(`Error:\n${r.error}`)
+    if (r.passed !== undefined) blocks.push(`Overall passed: ${r.passed}`)
+    if (r.nodeCount != null) blocks.push(`Node count: ${r.nodeCount}`)
+    if (r.exitCode !== undefined && r.exitCode !== null) blocks.push(`Exit code: ${r.exitCode}`)
+    if (r.bandwidth != null && !Number.isNaN(r.bandwidth)) blocks.push(`Bandwidth: ${r.bandwidth.toFixed(2)} GB/s`)
+    if (r.hosts?.length) blocks.push(`Hosts:\n${r.hosts.join("\n")}`)
+    if (r.command) blocks.push(`--- Command ---\n${r.command}`)
+    if (r.stdout) blocks.push(`--- stdout ---\n${r.stdout}`)
+    if (r.stderr) blocks.push(`--- stderr ---\n${r.stderr}`)
+    return blocks.join("\n\n")
+  }
+
+  const copyMultiNodeFullReport = async () => {
+    const text = buildMultiNodeReportText()
+    if (!text.trim()) {
+      toast({ title: tr("无内容可复制", "Nothing to copy"), variant: "destructive" })
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(text)
+      toast({ title: tr("已复制完整报告", "Full report copied") })
+    } catch {
+      toast({ title: tr("复制失败", "Copy failed"), variant: "destructive" })
+    }
+  }
+
   // 多机NCCL测试
   const handleRunMultiNodeTest = async () => {
     // 获取选中的节点IP列表
@@ -1424,9 +1516,6 @@ export default function BareMetal() {
       if (multiNodeConfig.ncclIbHca) mpiParams.nccl_ib_hca = multiNodeConfig.ncclIbHca
       if (multiNodeConfig.ucxNetDevices) mpiParams.ucx_net_devices = multiNodeConfig.ucxNetDevices
       if (multiNodeConfig.ncclIbQps) mpiParams.nccl_ib_qps = multiNodeConfig.ncclIbQps
-      if (multiNodeConfig.ncclPxnDisable) mpiParams.nccl_pxn_disable = multiNodeConfig.ncclPxnDisable
-      if (multiNodeConfig.ncclMinNchannels) mpiParams.nccl_min_nchannels = multiNodeConfig.ncclMinNchannels
-      if (multiNodeConfig.ncclNvlsEnable) mpiParams.nccl_nvls_enable = multiNodeConfig.ncclNvlsEnable
       if (multiNodeConfig.ncclCrossNic) mpiParams.nccl_cross_nic = multiNodeConfig.ncclCrossNic
       if (multiNodeConfig.ucxTls) mpiParams.ucx_tls = multiNodeConfig.ucxTls
       if (multiNodeConfig.ncclDebug) mpiParams.nccl_debug = multiNodeConfig.ncclDebug
@@ -1453,6 +1542,8 @@ export default function BareMetal() {
       
       // 轮询任务状态（在后台进行）
       const pollStatus = async () => {
+        let consecutivePollErrors = 0
+        const maxPollErrors = 10
         try {
           while (!abortController.signal.aborted) {
             try {
@@ -1474,41 +1565,84 @@ export default function BareMetal() {
                 method: "GET",
                 signal: abortController.signal,
               })
+              consecutivePollErrors = 0
 
               if (statusResult.status === "completed") {
                 if (statusResult.result) {
-                  setMultiNodeResult(statusResult.result)
+                  const r = statusResult.result
+                  setMultiNodeResult({
+                    ...r,
+                    bandwidth: r.bandwidth ?? undefined,
+                    error: undefined,
+                  })
                   toast({
-                    title: statusResult.result.passed ? tr("多机测试完成", "Multi-node test completed") : tr("多机测试失败", "Multi-node test failed"),
-                    description: statusResult.result.bandwidth ? `${tr("带宽", "Bandwidth")}: ${statusResult.result.bandwidth.toFixed(2)} GB/s` : undefined,
-                    variant: statusResult.result.passed ? "default" : "destructive",
+                    title: r.passed ? tr("多机测试完成", "Multi-node test completed") : tr("多机测试失败", "Multi-node test failed"),
+                    description: r.bandwidth ? `${tr("带宽", "Bandwidth")}: ${r.bandwidth.toFixed(2)} GB/s` : undefined,
+                    variant: r.passed ? "default" : "destructive",
+                  })
+                } else {
+                  const err = tr("后端已完成但未返回结果", "Backend completed but returned no result")
+                  setMultiNodeResult({
+                    passed: false,
+                    error: err,
+                    stdout: "",
+                    stderr: "",
+                  })
+                  toast({
+                    title: tr("多机测试异常", "Multi-node test anomaly"),
+                    description: err,
+                    variant: "destructive",
                   })
                 }
                 break
-              } else if (statusResult.status === "failed") {
-                // 测试失败，显示错误并退出轮询
+              }
+              if (statusResult.status === "failed") {
                 const errorMsg = statusResult.error || tr("多机测试失败", "Multi-node test failed")
+                setMultiNodeResult({
+                  passed: false,
+                  error: errorMsg,
+                  stdout: statusResult.result?.stdout || "",
+                  stderr: statusResult.result?.stderr || "",
+                  command: statusResult.result?.command,
+                  nodeCount: statusResult.result?.nodeCount,
+                  exitCode: statusResult.result?.exitCode,
+                  bandwidth: statusResult.result?.bandwidth ?? undefined,
+                  hosts: statusResult.result?.hosts,
+                })
                 toast({
                   title: tr("多机测试失败", "Multi-node test failed"),
-                  description: errorMsg,
+                  description: errorMsg.length > 200 ? `${errorMsg.slice(0, 200)}…` : errorMsg,
                   variant: "destructive",
                 })
                 break
-              } else if (statusResult.status === "running") {
-                // 继续等待
-                await new Promise(resolve => setTimeout(resolve, 2000)) // 每2秒轮询一次
+              }
+              if (statusResult.status === "running") {
+                await new Promise((resolve) => setTimeout(resolve, 2000))
               } else {
-                // pending状态，继续等待
-                await new Promise(resolve => setTimeout(resolve, 1000)) // 每1秒轮询一次
+                await new Promise((resolve) => setTimeout(resolve, 1000))
               }
             } catch (error) {
-              if (error instanceof Error && error.name === 'AbortError') {
-                // 用户取消，退出轮询
+              if (error instanceof Error && error.name === "AbortError") {
                 break
               }
-              // 网络错误或其他异常，记录并继续重试
+              consecutivePollErrors += 1
               console.error("轮询多机测试状态时发生错误:", error)
-              await new Promise(resolve => setTimeout(resolve, 2000))
+              if (consecutivePollErrors >= maxPollErrors) {
+                const msg = (error as Error).message || String(error)
+                setMultiNodeResult({
+                  passed: false,
+                  error: `${tr("多次拉取状态失败", "Too many poll failures")}: ${msg}`,
+                  stdout: "",
+                  stderr: "",
+                })
+                toast({
+                  title: tr("无法获取多机测试状态", "Failed to poll multi-node test"),
+                  description: msg,
+                  variant: "destructive",
+                })
+                break
+              }
+              await new Promise((resolve) => setTimeout(resolve, 2000))
             }
           }
         } finally {
@@ -1984,9 +2118,16 @@ export default function BareMetal() {
                     <tr className="border-b border-slate-800 text-slate-300">
                       <th className="py-3 px-4 text-left w-12">
                         <Checkbox
-                          checked={currentPageAllSelected}
-                          onCheckedChange={handleSelectAll}
+                          checked={pendingNodesHeaderCheckboxState}
+                          onCheckedChange={(v) => {
+                            if (v === true) {
+                              setSelectedNodeIds(new Set(selectedNodes.map((n) => n.id)))
+                            } else {
+                              setSelectedNodeIds(new Set())
+                            }
+                          }}
                           className="border-slate-600"
+                          title={tr("全选/取消全选（所有分页）", "Select / clear all nodes (all pages)")}
                         />
                       </th>
                       <th className="py-3 px-4 text-left">{tr("地址", "Address")}</th>
@@ -2357,28 +2498,26 @@ export default function BareMetal() {
                 <tr className="border-b border-slate-700">
                       <th className="text-left py-3 px-4 w-12">
                         <Checkbox
-                          checked={
-                            paginatedResults.length > 0 &&
-                            paginatedResults.every((item) => selectedResultIds.has(item.id))
-                          }
-                          onCheckedChange={() => {
-                            const allSelected = paginatedResults.every((item) => selectedResultIds.has(item.id))
-                            setSelectedResultIds((prev) => {
-                              const next = new Set(prev)
-                              if (allSelected) {
-                                paginatedResults.forEach((item) => next.delete(item.id))
-                              } else {
-                                paginatedResults.forEach((item) => next.add(item.id))
-                              }
-                              return next
-                            })
+                          checked={resultsHeaderCheckboxState}
+                          onCheckedChange={(v) => {
+                            if (v === true) {
+                              setSelectedResultIds(new Set(testResults.map((item) => item.id)))
+                            } else {
+                              setSelectedResultIds(new Set())
+                            }
                           }}
                           className="border-slate-600"
+                          title={tr("全选/取消全选（所有分页）", "Select / clear all rows (all pages)")}
                         />
                       </th>
                       <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("节点地址", "Node Address")}</th>
                   <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("GPU类型", "GPU Type")}</th>
-                  <th className="text-left py-3 px-4 text-slate-300 font-medium">nvBandwidthTest</th>
+                  <th className="text-left py-3 px-4 text-slate-300 font-medium">
+                    <div>nvBandwidthTest</div>
+                    <div className="text-[10px] font-normal text-slate-500 mt-0.5">
+                      {tr("PCIe H2D/D2H · GPU D2D", "PCIe H2D/D2H · GPU D2D")}
+                    </div>
+                  </th>
                   <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("NCCL测试", "NCCL Test")}</th>
                   <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("DCGM诊断", "DCGM Diagnostics")}</th>
                   <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("IB检查", "IB Check")}</th>
@@ -2409,7 +2548,7 @@ export default function BareMetal() {
                       </td>
                         <td className="py-3 px-4 text-white font-medium">{result.hostname || result.host}</td>
                         <td className="py-3 px-4 text-white">{result.gpuType || "Unknown"}</td>
-                        <td className="py-3 px-4">{renderMetric(result.nvbandwidth, "GB/s", language)}</td>
+                        <td className="py-3 px-4">{renderNvbandwidthMetric(result.nvbandwidth, "GB/s", language)}</td>
                         <td className="py-3 px-4">{renderMetric(result.nccl, "GB/s", language)}</td>
                       <td className="py-3 px-4">
                           {result.dcgm
@@ -2702,31 +2841,13 @@ export default function BareMetal() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-4 gap-2">
+              <div className="grid grid-cols-2 gap-2">
                 <div>
                   <Label className="text-xs text-slate-400">IB_QPS</Label>
                   <Input
                     value={multiNodeConfig.ncclIbQps}
                     onChange={(e) => setMultiNodeConfig(prev => ({ ...prev, ncclIbQps: e.target.value }))}
                     placeholder="8"
-                    className="bg-slate-800/50 border-slate-700 text-white text-sm h-8"
-                  />
-                </div>
-                <div>
-                  <Label className="text-xs text-slate-400">PXN_DISABLE</Label>
-                  <Input
-                    value={multiNodeConfig.ncclPxnDisable}
-                    onChange={(e) => setMultiNodeConfig(prev => ({ ...prev, ncclPxnDisable: e.target.value }))}
-                    placeholder="0"
-                    className="bg-slate-800/50 border-slate-700 text-white text-sm h-8"
-                  />
-                </div>
-                <div>
-                  <Label className="text-xs text-slate-400">MIN_NCHANNELS</Label>
-                  <Input
-                    value={multiNodeConfig.ncclMinNchannels}
-                    onChange={(e) => setMultiNodeConfig(prev => ({ ...prev, ncclMinNchannels: e.target.value }))}
-                    placeholder="32"
                     className="bg-slate-800/50 border-slate-700 text-white text-sm h-8"
                   />
                 </div>
@@ -2758,7 +2879,7 @@ export default function BareMetal() {
                   <Input
                     value={multiNodeConfig.allReducePerfPath}
                     onChange={(e) => setMultiNodeConfig(prev => ({ ...prev, allReducePerfPath: e.target.value }))}
-                    placeholder="/opt/nccl-tests/build/all_reduce_perf"
+                    placeholder="/tmp/ghx/nccl-tests/build/all_reduce_perf"
                     className="bg-slate-800/50 border-slate-700 text-white text-sm h-8"
                   />
                 </div>
@@ -2825,7 +2946,7 @@ export default function BareMetal() {
         {/* 多机测试执行结果区域 */}
         {(isRunningMultiNode || multiNodeResult) && (
           <Card className="bg-slate-900/50 border-purple-500/20 p-6 mb-8">
-            <div className="flex items-center gap-2 mb-4">
+            <div className="flex items-center gap-2 mb-4 flex-wrap">
               <Terminal className="w-5 h-5 text-purple-400" />
               <h3 className="text-lg font-semibold text-white">{tr("多机测试执行结果", "Multi-Node Test Results")}</h3>
               {isRunningMultiNode && (
@@ -2835,7 +2956,7 @@ export default function BareMetal() {
                 </Badge>
               )}
               {multiNodeResult && !isRunningMultiNode && (
-                multiNodeResult.passed ? (
+                multiNodeResult.passed === true ? (
                   <Badge className="bg-green-500/20 text-green-400 border border-green-500/40 ml-2">
                     <CheckCircle2 className="w-3 h-3 mr-1" />
                     {tr("通过", "Passed")}
@@ -2847,29 +2968,61 @@ export default function BareMetal() {
                   </Badge>
                 )
               )}
-              {multiNodeResult?.bandwidth && (
-                <div className="ml-auto text-right">
-                  <span className="text-2xl font-bold text-cyan-400">{multiNodeResult.bandwidth.toFixed(2)} GB/s</span>
-                </div>
-              )}
+              <div className="ml-auto flex items-center gap-2 flex-wrap">
+                {multiNodeResult && !isRunningMultiNode && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="border-purple-500/40 text-purple-200 hover:bg-purple-500/10 h-8"
+                    onClick={copyMultiNodeFullReport}
+                  >
+                    <Copy className="w-3.5 h-3.5 mr-1" />
+                    {tr("复制完整报告", "Copy full report")}
+                  </Button>
+                )}
+                {multiNodeResult?.bandwidth != null && !Number.isNaN(multiNodeResult.bandwidth) && (
+                  <span className="text-2xl font-bold text-cyan-400 tabular-nums">
+                    {multiNodeResult.bandwidth.toFixed(2)} GB/s
+                  </span>
+                )}
+              </div>
             </div>
+
+            {multiNodeResult?.error && (
+              <div className="mb-4 rounded-md border border-red-500/40 bg-red-950/35 p-3 text-sm text-red-100 whitespace-pre-wrap break-words font-mono leading-relaxed">
+                {multiNodeResult.error}
+              </div>
+            )}
 
             {multiNodeResult && (
               <>
                 <div className="grid grid-cols-3 gap-4 mb-4 text-sm">
                   <div className="bg-slate-800/30 rounded p-3">
                     <p className="text-slate-400 text-xs">{tr("节点数量", "Node Count")}</p>
-                    <p className="text-white font-semibold">{multiNodeResult.nodeCount}</p>
+                    <p className="text-white font-semibold">{multiNodeResult.nodeCount ?? "—"}</p>
                   </div>
                   <div className="bg-slate-800/30 rounded p-3">
                     <p className="text-slate-400 text-xs">{tr("退出码", "Exit Code")}</p>
-                    <p className={multiNodeResult.exitCode === 0 ? "text-green-400 font-semibold" : "text-red-400 font-semibold"}>
-                      {multiNodeResult.exitCode}
+                    <p
+                      className={
+                        multiNodeResult.exitCode === 0
+                          ? "text-green-400 font-semibold"
+                          : multiNodeResult.exitCode != null
+                            ? "text-red-400 font-semibold"
+                            : "text-slate-400 font-semibold"
+                      }
+                    >
+                      {multiNodeResult.exitCode ?? "—"}
                     </p>
                   </div>
                   <div className="bg-slate-800/30 rounded p-3">
                     <p className="text-slate-400 text-xs">{tr("测试带宽", "Bandwidth")}</p>
-                    <p className="text-cyan-400 font-semibold">{multiNodeResult.bandwidth ? `${multiNodeResult.bandwidth.toFixed(2)} GB/s` : '--'}</p>
+                    <p className="text-cyan-400 font-semibold">
+                      {multiNodeResult.bandwidth != null && !Number.isNaN(multiNodeResult.bandwidth)
+                        ? `${multiNodeResult.bandwidth.toFixed(2)} GB/s`
+                        : "—"}
+                    </p>
                   </div>
                 </div>
 
@@ -2895,21 +3048,44 @@ export default function BareMetal() {
                   </div>
 
                   <div>
-                    <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
                       <Label className="text-xs text-slate-400">{tr("执行日志", "Execution Log")}</Label>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => setLogViewer({
-                          open: true,
-                          content: multiNodeResult.stdout || "",
-                          title: tr("多机NCCL测试日志", "Multi-Node NCCL Test Log"),
-                        })}
-                        className="text-xs text-blue-400 hover:text-blue-300 h-6"
-                      >
-                        <FileText className="w-3 h-3 mr-1" />
-                        {tr("全屏查看", "Full Screen")}
-                      </Button>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={async () => {
+                            const t = multiNodeResult.stdout || ""
+                            if (!t) {
+                              toast({ title: tr("无 stdout", "No stdout"), variant: "destructive" })
+                              return
+                            }
+                            try {
+                              await navigator.clipboard.writeText(t)
+                              toast({ title: tr("已复制 stdout", "stdout copied") })
+                            } catch {
+                              toast({ title: tr("复制失败", "Copy failed"), variant: "destructive" })
+                            }
+                          }}
+                          className="text-xs text-slate-300 hover:text-white h-6"
+                        >
+                          <Copy className="w-3 h-3 mr-1" />
+                          {tr("复制日志", "Copy log")}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setLogViewer({
+                            open: true,
+                            content: multiNodeResult.stdout || "",
+                            title: tr("多机NCCL测试日志", "Multi-Node NCCL Test Log"),
+                          })}
+                          className="text-xs text-blue-400 hover:text-blue-300 h-6"
+                        >
+                          <FileText className="w-3 h-3 mr-1" />
+                          {tr("全屏查看", "Full Screen")}
+                        </Button>
+                      </div>
                     </div>
                     <pre className="bg-slate-950/50 rounded p-3 text-xs text-slate-300 font-mono max-h-80 overflow-y-auto border border-slate-800">
                       {multiNodeResult.stdout || tr("等待输出...", "Waiting for output...")}
@@ -2918,7 +3094,25 @@ export default function BareMetal() {
 
                   {multiNodeResult.stderr && (
                     <div>
-                      <Label className="text-xs text-red-400 mb-2 block">{tr("错误输出", "Error Output")}</Label>
+                      <div className="flex items-center justify-between mb-2">
+                        <Label className="text-xs text-red-400">{tr("错误输出", "Error Output")}</Label>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(multiNodeResult.stderr || "")
+                              toast({ title: tr("已复制 stderr", "stderr copied") })
+                            } catch {
+                              toast({ title: tr("复制失败", "Copy failed"), variant: "destructive" })
+                            }
+                          }}
+                          className="text-xs text-red-300 hover:text-red-100 h-6"
+                        >
+                          <Copy className="w-3 h-3 mr-1" />
+                          {tr("复制", "Copy")}
+                        </Button>
+                      </div>
                       <pre className="bg-red-950/30 rounded p-3 text-xs text-red-300 font-mono max-h-40 overflow-y-auto border border-red-800/50">
                         {multiNodeResult.stderr}
                       </pre>

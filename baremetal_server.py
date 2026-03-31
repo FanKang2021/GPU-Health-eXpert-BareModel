@@ -56,10 +56,10 @@ FALLBACK_GPU_BENCHMARKS = {
     "RTX 4090": {"d2d": 18, "nccl": 7, "h2d_d2h": 20},
     "A100": {"d2d": 420, "nccl": 70, "h2d_d2h": 20},
     "A800": {"d2d": 340, "nccl": 55, "h2d_d2h": 20},
-    "H100": {"d2d": 700, "nccl": 139, "h2d_d2h": 50},
+    "H100": {"d2d": 700, "nccl": 139, "h2d_d2h": 49},
     "H800": {"d2d": 340, "nccl": 65, "h2d_d2h": 47},
-    "H200": {"d2d": 705, "nccl": 145, "h2d_d2h": 50},
-    "B200": {"d2d": 1380, "nccl": 185, "h2d_d2h": 50},
+    "H200": {"d2d": 705, "nccl": 145, "h2d_d2h": 49},
+    "B200": {"d2d": 1380, "nccl": 185, "h2d_d2h": 49},
 }
 
 BENCHMARK_FILE = os.getenv("GPU_BENCHMARK_FILE", str(BASE_DIR / "config" / "gpu-benchmarks.json"))
@@ -342,22 +342,45 @@ class SSHSession:
 # -----------------------------------------------------------------------------
 
 
-def parse_nvbandwidth(output: str) -> float:
+def parse_nvbandwidth_h2d_d2h_memcpy_ce(output: str) -> float:
+    """
+    解析 nvbandwidth -t 2 / -t 3（host/device bidirectional memcpy CE）矩阵。
+    跳过表头下一行的「列 GPU 索引」行：该行以 0 开头且单元格为无小数整数 0–32，会被误判为带宽。
+    """
     values: List[float] = []
+    in_matrix = False
     for line in output.splitlines():
-        line = line.strip()
-        if not line or not line[0].isdigit():
+        s = line.strip()
+        if "bandwidth" in s.lower() and "(gb/s)" in s.lower():
+            in_matrix = True
             continue
-        parts = line.split()
-        for chunk in parts[1:]:
+        if not in_matrix:
+            continue
+        if s.upper().startswith("SUM"):
+            break
+        if not s or not s[0].isdigit():
+            continue
+        parts = s.split()
+        if len(parts) < 2:
+            continue
+        for part in parts[1:]:
+            if part.upper() in ("N/A", "NA", "-"):
+                continue
             try:
-                value = float(chunk)
-                # h2d/d2h 通常在较小区间（与 d2d matrix 形成区分）
-                if 5.0 <= value <= 200.0:
-                    values.append(value)
+                value = float(part)
             except ValueError:
-                break
+                continue
+            # 列标题里的 GPU 序号（无小数，数值较小）
+            if "." not in part and "e" not in part.lower() and value == int(value) and 0 <= value <= 32:
+                continue
+            if 5.0 <= value <= 300.0:
+                values.append(value)
     return min(values) if values else 0.0
+
+
+def parse_nvbandwidth(output: str) -> float:
+    """兼容旧名：实为 H2D/D2H memcpy CE 矩阵解析。"""
+    return parse_nvbandwidth_h2d_d2h_memcpy_ce(output)
 
 
 def parse_nvbandwidth_d2d_total_bandwidth(output: str) -> float:
@@ -403,7 +426,7 @@ def parse_nvbandwidth_d2d_total_bandwidth(output: str) -> float:
                         value = float(part)
                     except ValueError:
                         continue
-                    if 50.0 <= value <= 2000.0:
+                    if 50.0 <= value <= 5000.0:
                         bandwidth_values.append(value)
 
         return min(bandwidth_values) if bandwidth_values else 0.0
@@ -655,8 +678,8 @@ class RemoteNodeRunner:
                     f"H2D={h2d.exit_code}, D2H={d2h.exit_code}, D2D_READ={d2d_read.exit_code}, D2D_WRITE={d2d_write.exit_code}"
                 )
 
-            h2d_value = parse_nvbandwidth(h2d.stdout)
-            d2h_value = parse_nvbandwidth(d2h.stdout)
+            h2d_value = parse_nvbandwidth_h2d_d2h_memcpy_ce(h2d.stdout)
+            d2h_value = parse_nvbandwidth_h2d_d2h_memcpy_ce(d2h.stdout)
             d2d_read_value = parse_nvbandwidth_d2d_total_bandwidth(d2d_read.stdout)
             d2d_write_value = parse_nvbandwidth_d2d_total_bandwidth(d2d_write.stdout)
 
@@ -666,12 +689,10 @@ class RemoteNodeRunner:
             else:
                 d2d_value = max(d2d_read_value, d2d_write_value)
 
-            valid_values = [v for v in (h2d_value, d2h_value, d2d_value) if v > 0]
-            if not valid_values:
+            if h2d_value <= 0 or d2h_value <= 0 or d2d_value <= 0:
                 raise RuntimeError("nvbandwidth未解析到有效结果（h2d/d2h/d2d）")
 
-            raw_value = min(valid_values)
-
+            h2d_d2h_floor = min(h2d_value, d2h_value)
             benchmark_h2d_d2h = self.benchmark_for("h2d_d2h")
             benchmark_d2d = self.benchmark_for("d2d")
 
@@ -680,14 +701,15 @@ class RemoteNodeRunner:
             passed = passed_h2d_d2h and passed_d2d
 
             self.log(
-                f"nvbandwidth测试完成: raw={raw_value:.1f} GB/s, H2D={h2d_value:.1f}, D2H={d2h_value:.1f}, D2D={d2d_value:.1f}"
+                f"nvbandwidth测试完成: H2D/D2H floor={h2d_d2h_floor:.1f} GB/s (H2D={h2d_value:.1f}, D2H={d2h_value:.1f}), "
+                f"D2D={d2d_value:.1f} GB/s"
             )
 
             return {
                 "status": "passed" if passed else "failed",
-                "value": raw_value,
+                # 主列展示：PCIe 路径 H2D/D2H 较差值，与 h2d_d2h 基准对照（不再与 D2D 混用 min 导致误解）
+                "value": h2d_d2h_floor,
                 "unit": "GB/s",
-                # 为了前端展示保留一个 benchmark 值：展示 h2d_d2h 基准
                 "benchmark": benchmark_h2d_d2h,
                 "passed": passed,
                 "details": {
@@ -696,7 +718,10 @@ class RemoteNodeRunner:
                     "d2d_read": d2d_read_value,
                     "d2d_write": d2d_write_value,
                     "d2d": d2d_value,
-                    "benchmarks": {"h2d_d2h": benchmark_h2d_d2h, "d2d": benchmark_d2d},
+                    "benchmark_h2d_d2h": benchmark_h2d_d2h,
+                    "benchmark_d2d": benchmark_d2d,
+                    "passed_h2d_d2h": passed_h2d_d2h,
+                    "passed_d2d": passed_d2d,
                 },
                 "rawOutput": f"{h2d.stdout}\n{d2h.stdout}\n{d2d_read.stdout}\n{d2d_write.stdout}",
             }
@@ -1610,15 +1635,19 @@ def run_multi_node_nccl_task(test_id: str, payload: Dict[str, Any]):
         
         np_count = len(host_list)
         gpu_count = mpi_params.get("gpuPerNode", 8)
-        all_reduce_perf = (mpi_params.get("all_reduce_perf_path") or "/opt/nccl-tests/build/all_reduce_perf").strip()
+        # 与 upload/编译 路径一致；若节点已预装在 /opt，请在前端或 mpiParams 中显式指定
+        all_reduce_perf = (mpi_params.get("all_reduce_perf_path") or "/tmp/ghx/nccl-tests/build/all_reduce_perf").strip()
 
         # 构建 mpirun 命令（对齐新版 NCCL/UCX 多机测试模板）
+        # wrap_bash 使用 set -u：未设置的 $LD_LIBRARY_PATH 会在展开时报 unbound variable。
+        # 先在 shell 里合并路径，再用 -x 传递给各进程（与原先 /usr/local/lib 前置等效）。
         mpi_cmd_parts = [
+            'export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"',
             "mpirun",
             f"-np {np_count}",
             "--allow-run-as-root",
-            "-bind-to core",
-            "-x LD_LIBRARY_PATH=/usr/local/lib/:$LD_LIBRARY_PATH",
+            "-bind-to none",
+            "-x LD_LIBRARY_PATH",
         ]
 
         if mpi_params.get("btl_tcp_if"):
@@ -1651,16 +1680,6 @@ def run_multi_node_nccl_task(test_id: str, payload: Dict[str, Any]):
         if mpi_params.get("nccl_debug"):
             mpi_cmd_parts.append(f"-x NCCL_DEBUG={mpi_params['nccl_debug']}")
 
-        # 兼容旧版前端仍可能传入的可选参数
-        if mpi_params.get("nccl_pxn_disable") is not None and str(mpi_params.get("nccl_pxn_disable")).strip() != "":
-            mpi_cmd_parts.append(f"-x NCCL_PXN_DISABLE={mpi_params['nccl_pxn_disable']}")
-
-        if mpi_params.get("nccl_min_nchannels"):
-            mpi_cmd_parts.append(f"-x NCCL_MIN_NCHANNELS={mpi_params['nccl_min_nchannels']}")
-
-        if mpi_params.get("nccl_nvls_enable") is not None and str(mpi_params.get("nccl_nvls_enable")).strip() != "":
-            mpi_cmd_parts.append(f"-x NCCL_NVLS_ENABLE={mpi_params['nccl_nvls_enable']}")
-
         # 已弃用：SHARP_COLL_ENABLE_PCI_RELAXED_ORDERING（由前端 sharp_enabled 替代）
 
         if mpi_params.get("extra"):
@@ -1675,7 +1694,7 @@ def run_multi_node_nccl_task(test_id: str, payload: Dict[str, Any]):
             f"{all_reduce_perf} -b 128M -e 16G -f 2 -g {gpu_count} -c 0 -t 1"
         )
 
-        mpi_command = " \\\n".join(mpi_cmd_parts)
+        mpi_command = "\n".join([mpi_cmd_parts[0], " \\\n".join(mpi_cmd_parts[1:])])
         
         # 连接主节点执行
         with SSHSession(connection) as session:
@@ -1694,48 +1713,17 @@ def run_multi_node_nccl_task(test_id: str, payload: Dict[str, Any]):
             check_text = check_res.stdout.strip()
             sharp_plugins_tgz = ASSETS.get("nccl_sharp_plugins")
             sharp_plugins_asset_exists = sharp_plugins_tgz is not None and sharp_plugins_tgz.exists()
+            needs_nccl_rebuild = "NCCL_MISSING" in check_text
             needs_plugins_compile = (
                 sharp_compile_requested
                 and sharp_plugins_asset_exists
                 and "PLUGINS_MISSING" in check_text
             )
-            needs_compile = ("NCCL_MISSING" in check_text) or needs_plugins_compile
-            if needs_compile:
-                logger.info("主节点 nccl-tests 或 sharp 插件需要准备，开始上传源码并编译")
-                
-                nccl_tgz = ASSETS["nccl"]
-                nccl_tests_tgz = ASSETS["nccl_tests"]
-                # sharp_plugins_tgz 由外层已判断是否存在
-                
-                if not nccl_tgz.exists():
-                    raise FileNotFoundError(f"nccl.tgz 文件不存在: {nccl_tgz}")
-                if not nccl_tests_tgz.exists():
-                    raise FileNotFoundError(f"nccl-tests.tgz 文件不存在: {nccl_tests_tgz}")
-                
-                remote_nccl_tgz = "/tmp/ghx/nccl.tgz"
-                remote_nccl_tests_tgz = "/tmp/ghx/nccl-tests.tgz"
+            # 第二次启用 SHARP：NCCL_OK + PLUGINS_MISSING → 仅补装插件，不应跳过，也不应误删已有 nccl-tests
+            if needs_nccl_rebuild or needs_plugins_compile:
                 remote_sharp_plugins_tgz = "/tmp/ghx/nccl-rdma-sharp-plugins.tgz"
-                session.upload(nccl_tgz, remote_nccl_tgz)
-                session.upload(nccl_tests_tgz, remote_nccl_tests_tgz)
-                
-                sharp_plugins_enabled = sharp_compile_requested and sharp_plugins_tgz is not None and sharp_plugins_tgz.exists()
-                if sharp_plugins_enabled:
-                    session.upload(sharp_plugins_tgz, remote_sharp_plugins_tgz)
-                elif sharp_compile_requested and not sharp_plugins_asset_exists:
-                    logger.warning("nccl-rdma-sharp-plugins.tgz 不存在，跳过 sharp 插件编译")
-                elif not sharp_compile_requested:
-                    logger.info("未启用 SHARP，跳过 nccl-rdma-sharp-plugins 上传与编译")
-                
-                # 检测OpenMPI版本
-                openmpi_version = detect_openmpi_version(session)
-                compile_mpi_flags = ""
-                if openmpi_version:
-                    mpi_home = f"/usr/mpi/gcc/openmpi-{openmpi_version}"
-                    compile_mpi_flags = f"MPI=1 MPI_HOME={mpi_home}"
-                    logger.info(f"主节点检测到OpenMPI版本: {openmpi_version}, 使用MPI参数: {compile_mpi_flags}")
-                else:
-                    logger.info("主节点未检测到OpenMPI，将不使用MPI参数编译")
-                
+                sharp_plugins_enabled = sharp_plugins_tgz is not None and sharp_plugins_tgz.exists()
+
                 sharp_plugins_compile_block = ""
                 if sharp_plugins_enabled:
                     sharp_plugins_compile_block = f"""
@@ -1748,9 +1736,9 @@ else
   rm -f /tmp/ghx/nccl-rdma-sharp-plugins.tgz
   cd /tmp/ghx/nccl-rdma-sharp-plugins
   echo "运行 autogen.sh..."
-  ./autogen.sh
+  bash autogen.sh
   echo "运行 configure..."
-  ./configure --with-cuda=/usr/local/cuda
+  bash ./configure --with-cuda=/usr/local/cuda
   echo "编译 nccl-rdma-sharp-plugins..."
   make -j$(nproc) CUDA_HOME=/usr/local/cuda 2>&1 | tee /tmp/ghx/sharp_plugins_build.log
   if [ $? -ne 0 ]; then
@@ -1770,7 +1758,42 @@ else
 fi
 """
 
-                compile_script = f"""
+                if needs_plugins_compile and not sharp_plugins_enabled:
+                    raise RuntimeError(
+                        "已启用 SHARP 且节点缺少 nccl-rdma-sharp-plugins，但未找到 nccl-rdma-sharp-plugins.tgz 资产，无法补装"
+                    )
+
+                if needs_nccl_rebuild:
+                    logger.info("主节点需要编译 nccl/nccl-tests%s", "（并安装 SHARP 插件）" if needs_plugins_compile else "")
+                    nccl_tgz = ASSETS["nccl"]
+                    nccl_tests_tgz = ASSETS["nccl_tests"]
+                    if not nccl_tgz.exists():
+                        raise FileNotFoundError(f"nccl.tgz 文件不存在: {nccl_tgz}")
+                    if not nccl_tests_tgz.exists():
+                        raise FileNotFoundError(f"nccl-tests.tgz 文件不存在: {nccl_tests_tgz}")
+                    remote_nccl_tgz = "/tmp/ghx/nccl.tgz"
+                    remote_nccl_tests_tgz = "/tmp/ghx/nccl-tests.tgz"
+                    session.upload(nccl_tgz, remote_nccl_tgz)
+                    session.upload(nccl_tests_tgz, remote_nccl_tests_tgz)
+                    if sharp_plugins_enabled:
+                        session.upload(sharp_plugins_tgz, remote_sharp_plugins_tgz)
+                    elif sharp_compile_requested and not sharp_plugins_asset_exists:
+                        logger.warning("nccl-rdma-sharp-plugins.tgz 不存在，跳过 sharp 插件编译")
+                    elif not sharp_compile_requested:
+                        logger.info("未启用 SHARP，跳过 nccl-rdma-sharp-plugins 上传与编译")
+
+                    openmpi_version = detect_openmpi_version(session)
+                    compile_mpi_flags = ""
+                    if openmpi_version:
+                        mpi_home = f"/usr/mpi/gcc/openmpi-{openmpi_version}"
+                        compile_mpi_flags = f"MPI=1 MPI_HOME={mpi_home}"
+                        logger.info(
+                            "主节点检测到OpenMPI版本: %s, 使用MPI参数: %s", openmpi_version, compile_mpi_flags
+                        )
+                    else:
+                        logger.info("主节点未检测到OpenMPI，将不使用MPI参数编译")
+
+                    compile_script = f"""
 set -e
 rm -rf /tmp/ghx/nccl /tmp/ghx/nccl-tests
 echo "解压 nccl.tgz..."
@@ -1804,16 +1827,39 @@ chmod +x /tmp/ghx/nccl-tests/build/all_reduce_perf
 echo "编译完成"
 {sharp_plugins_compile_block}
 """
-                compile_result = session.run(compile_script, timeout=600, require_root=True)
-                if compile_result.exit_code != 0:
-                    raise RuntimeError(f"编译失败: {compile_result.stderr or compile_result.stdout}")
-                
-                check_res = session.run("[ -f /tmp/ghx/nccl-tests/build/all_reduce_perf ] && echo OK || echo MISSING")
-                if check_res.stdout.strip() != "OK":
-                    raise RuntimeError("nccl-tests 编译后仍未找到 all_reduce_perf")
+                    compile_result = session.run(compile_script, timeout=600, require_root=True)
+                    if compile_result.exit_code != 0:
+                        raise RuntimeError(f"编译失败: {compile_result.stderr or compile_result.stdout}")
 
-                if sharp_plugins_enabled:
-                    check_plugins_res = session.run(f"[ -f {sharp_plugins_marker} ] && echo OK || echo MISSING")
+                    check_res = session.run(
+                        "[ -f /tmp/ghx/nccl-tests/build/all_reduce_perf ] && echo OK || echo MISSING"
+                    )
+                    if check_res.stdout.strip() != "OK":
+                        raise RuntimeError("nccl-tests 编译后仍未找到 all_reduce_perf")
+
+                    if sharp_plugins_enabled:
+                        check_plugins_res = session.run(
+                            f"[ -f {sharp_plugins_marker} ] && echo OK || echo MISSING"
+                        )
+                        if check_plugins_res.stdout.strip() != "OK":
+                            raise RuntimeError("sharp 插件编译后仍未找到安装标记文件（.build_complete）")
+                elif needs_plugins_compile:
+                    logger.info(
+                        "主节点已有 nccl-tests，本次仅上传并编译 nccl-rdma-sharp-plugins（不删除已有 nccl 构建）"
+                    )
+                    session.upload(sharp_plugins_tgz, remote_sharp_plugins_tgz)
+                    compile_result = session.run(
+                        f"set -e\n{sharp_plugins_compile_block}",
+                        timeout=600,
+                        require_root=True,
+                    )
+                    if compile_result.exit_code != 0:
+                        raise RuntimeError(
+                            f"SHARP 插件编译失败: {compile_result.stderr or compile_result.stdout}"
+                        )
+                    check_plugins_res = session.run(
+                        f"[ -f {sharp_plugins_marker} ] && echo OK || echo MISSING"
+                    )
                     if check_plugins_res.stdout.strip() != "OK":
                         raise RuntimeError("sharp 插件编译后仍未找到安装标记文件（.build_complete）")
             
@@ -1822,7 +1868,7 @@ echo "编译完成"
             other_hosts = host_list[1:]
             
             if other_hosts:
-                logger.info("开始为其他 %d 个节点并发上传源码并编译 nccl-tests", len(other_hosts))
+                logger.info("开始为其他 %d 个节点串行上传源码并编译 nccl-tests", len(other_hosts))
                 
                 nccl_tgz = ASSETS["nccl"]
                 nccl_tests_tgz = ASSETS["nccl_tests"]
@@ -1856,24 +1902,6 @@ ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 {host} "[ -f /tmp/ghx/nccl-
 """
                         check_result = session.run(check_script, timeout=30, require_root=True)
                         check_text = check_result.stdout.strip()
-                        if sharp_plugins_enabled:
-                            nccl_ok = "NCCL_OK" in check_text
-                            plugins_ok = "PLUGINS_OK" in check_text
-                            if nccl_ok and plugins_ok:
-                                logger.info("节点 %s 已存在 nccl-tests 与 sharp 插件，跳过编译", host)
-                                return (host, True, "")
-                        else:
-                            if check_text == "OK":
-                                logger.info("节点 %s 已存在 nccl-tests，跳过编译", host)
-                                return (host, True, "")
-                        
-                        logger.info("开始为节点 %s 上传源码并编译 nccl-tests", host)
-                        # 不可在外层 f""" 内再嵌套 f"""（会提前结束字符串）；拆成片段再拼接
-                        sharp_scp_fragment = (
-                            f"scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 {temp_sharp_plugins_path} {host}:/tmp/ghx/nccl-rdma-sharp-plugins.tgz || exit 1\n"
-                            if sharp_plugins_enabled
-                            else ""
-                        )
                         sharp_remote_plugins_fragment = ""
                         if sharp_plugins_enabled:
                             sharp_remote_plugins_fragment = f"""
@@ -1882,9 +1910,9 @@ tar -xzf /tmp/ghx/nccl-rdma-sharp-plugins.tgz -C /tmp/ghx
 rm -f /tmp/ghx/nccl-rdma-sharp-plugins.tgz
 cd /tmp/ghx/nccl-rdma-sharp-plugins
 echo "运行 autogen.sh..."
-./autogen.sh
+bash autogen.sh
 echo "运行 configure..."
-./configure --with-cuda=/usr/local/cuda
+bash ./configure --with-cuda=/usr/local/cuda
 echo "编译 nccl-rdma-sharp-plugins..."
 make -j$(nproc) CUDA_HOME=/usr/local/cuda 2>&1 | tee /tmp/sharp_plugins_build.log
 if [ $? -ne 0 ]; then
@@ -1902,6 +1930,52 @@ fi
 touch "{sharp_plugins_marker}"
 ldconfig || true
 """
+                        if sharp_plugins_enabled:
+                            nccl_ok = "NCCL_OK" in check_text
+                            plugins_ok = "PLUGINS_OK" in check_text
+                            if nccl_ok and plugins_ok:
+                                logger.info("节点 %s 已存在 nccl-tests 与 sharp 插件，跳过编译", host)
+                                return (host, True, "")
+                            if nccl_ok and not plugins_ok:
+                                logger.info(
+                                    "节点 %s 已有 nccl-tests，仅分发并编译 SHARP 插件（不重建 nccl/nccl-tests）",
+                                    host,
+                                )
+                                plugins_only_script = f"""
+set -e
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 {host} "mkdir -p /tmp/ghx" || exit 1
+scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 {temp_sharp_plugins_path} {host}:/tmp/ghx/nccl-rdma-sharp-plugins.tgz || exit 1
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 {host} << 'REMOTE_SHARP_ONLY'
+set -e
+{sharp_remote_plugins_fragment}
+REMOTE_SHARP_ONLY
+"""
+                                po_res = session.run(plugins_only_script, timeout=600, require_root=True)
+                                if po_res.exit_code != 0:
+                                    em = po_res.stderr or po_res.stdout or "未知错误"
+                                    logger.error("节点 %s SHARP 插件安装失败: %s", host, em)
+                                    return (host, False, em)
+                                verify_po = session.run(
+                                    f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 {host} "
+                                    f'"[ -f {sharp_plugins_marker} ] && echo OK || echo MISSING"',
+                                    timeout=30,
+                                    require_root=True,
+                                )
+                                if verify_po.stdout.strip() != "OK":
+                                    return (host, False, "SHARP 插件安装后未找到 .build_complete")
+                                logger.info("节点 %s SHARP 插件安装成功", host)
+                                return (host, True, "")
+                        else:
+                            if check_text == "OK":
+                                logger.info("节点 %s 已存在 nccl-tests，跳过编译", host)
+                                return (host, True, "")
+
+                        logger.info("开始为节点 %s 上传源码并编译 nccl-tests", host)
+                        sharp_scp_fragment = (
+                            f"scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 {temp_sharp_plugins_path} {host}:/tmp/ghx/nccl-rdma-sharp-plugins.tgz || exit 1\n"
+                            if sharp_plugins_enabled
+                            else ""
+                        )
                         upload_and_compile_script = f"""
 set -e
 echo "上传源码到节点 {host}..."
@@ -1972,18 +2046,18 @@ fi
                         logger.exception("节点 %s 编译异常: %s", host, error_msg)
                         return (host, False, error_msg)
                 
-                failed_hosts = []
-                with ThreadPoolExecutor(max_workers=min(len(other_hosts), 10)) as executor:
-                    future_to_host = {executor.submit(upload_and_compile_node, host): host for host in other_hosts}
-                    for future in as_completed(future_to_host):
-                        host = future_to_host[future]
-                        try:
-                            result_host, success, error_msg = future.result()
-                            if not success:
-                                failed_hosts.append((result_host, error_msg))
-                        except Exception as exc:
-                            logger.exception("节点 %s 任务执行异常: %s", host, exc)
-                            failed_hosts.append((host, str(exc)))
+                # 同一 Paramiko SSHClient（单 TCP 连接）上并发 exec_command 会叠加多个 channel，
+                # 超过 sshd MaxSessions（常见 10）时出现 ChannelException(2, 'Connect failed')。
+                # 与「主节点 SSH 能连」不矛盾；逐节点串行可避免。
+                failed_hosts: List[tuple[str, str]] = []
+                for host in other_hosts:
+                    try:
+                        result_host, success, error_msg = upload_and_compile_node(host)
+                        if not success:
+                            failed_hosts.append((result_host, error_msg))
+                    except Exception as exc:
+                        logger.exception("节点 %s 任务执行异常: %s", host, exc)
+                        failed_hosts.append((host, str(exc)))
                 
                 session.run(
                     f"rm -f {temp_nccl_path} {temp_nccl_tests_path}" + (f" {temp_sharp_plugins_path}" if sharp_plugins_enabled else ""),
@@ -1991,7 +2065,13 @@ fi
                 )
                 
                 if failed_hosts:
-                    error_msg = f"以下节点编译失败: {', '.join([h for h, _ in failed_hosts])}\n请确保：\n1. SSH免密已配置\n2. 节点之间网络连通\n3. 节点有足够的编译工具"
+                    error_msg = (
+                        f"以下节点编译失败: {', '.join([h for h, _ in failed_hosts])}\n请确保：\n"
+                        "1. 主节点到各从节点 SSH 免密、网络互通（跳板机需在主节点上配置好）\n"
+                        "2. 各节点具备编译依赖（make、gcc、g++、CUDA 等）\n"
+                        "3. 若日志出现 ChannelException(2)/Connect failed，多为单连接上并发会话过多；"
+                        "本工具已改为串行分发，仍失败请检查主节点 sshd 的 MaxSessions 与负载"
+                    )
                     logger.error("部分节点编译失败: %s", ', '.join([h for h, _ in failed_hosts]))
                     raise RuntimeError(error_msg)
                 
