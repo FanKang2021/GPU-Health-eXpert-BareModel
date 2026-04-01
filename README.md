@@ -121,6 +121,7 @@ python baremetal_server.py
 | ---- | ---- | ---- |
 | `PORT` | 5000 | API 端口 |
 | `GHX_ASSET_DIR` | 项目根目录 | 指定工具/压缩包所在目录 |
+| `GHX_REMOTE_DIR` | （空，自动探测可写目录） | 单节点 Job 上传 `nvbandwidth`/IB 脚本的远程路径；默认识别 `/tmp/ghx` 不可写时改用 `~/.ghx-bare` |
 | `GPU_BENCHMARK_FILE` | `config/gpu-benchmarks.json` | GPU基准值配置文件，支持通过 Docker Volume 热更新（重启容器即可生效） |
 
 #### 前端（Next.js）
@@ -151,6 +152,7 @@ pnpm start
 | `NEXT_PUBLIC_GHX_API` | 前端环境变量 | 指向后端 REST API 地址 |
 | `PORT` | 后端环境变量 | Flask 服务监听端口 |
 | `GHX_ASSET_DIR` | 后端环境变量 | 指向 `nvbandwidth` 等资产所在目录 |
+| `GHX_REMOTE_DIR` | 后端环境变量 | 可选，指定 SSH 目标上首选工作目录（默认可写性检测失败时自动用 `~/.ghx-bare`） |
 | `GPU_BENCHMARK_FILE` | 后端环境变量 | GPU 基准值 JSON 文件路径，可通过挂载文件热更新 |
 
 ---
@@ -174,6 +176,10 @@ ghx-bare/
 
 - 多机 NCCL：远端命令在 `set -u` 下执行；若曾出现 `LD_LIBRARY_PATH: unbound variable`，后端已改为先 `export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"` 再调用 `mpirun -x LD_LIBRARY_PATH`。
 - SHARP 插件：解压包内脚本可能无执行位，构建使用 `bash autogen.sh` / `bash ./configure`，避免 `./autogen.sh: Permission denied`。
+- nvbandwidth / IB 出现 `[Errno 13] Permission denied`：多为远端 `/tmp/ghx` 对当前 SSH 用户不可写、或后端容器无法读本地 `nvbandwidth` 资产。后端会尝试 `~/.ghx-bare`；也可设置 `GHX_REMOTE_DIR`。IB 脚本已改为 `bash ib_health_check.sh`，避免解压后无执行位。
+- 多机 MPI NCCL 固定使用主节点 **`/tmp/ghx`**（常以 root/sudo 编译，目录属主多为 root）；单机 Job 若以普通用户连接、不能写 `/tmp/ghx`，会上传到 **`~/.ghx-bare`**。若节点上已有 **`/tmp/ghx/.../all_reduce_perf`**（例如刚跑过多机任务），单节点 NCCL 会**复用该构建**，不再在 home 下重复编译。
+- 多机任务**第一个节点**会经 SFTP 上传 `nccl.tgz`：需能创建 `/tmp/ghx` 且**当前 SSH 用户可写**，或配置**无密码 sudo**（后端会 `sudo mkdir`/`sudo chown`）。若仅 `mkdir` 未成功仍上传，会报 **`[Errno 2] No such file`**。
+- `dcgmi diag` 报 `API version mismatch (-12)`：节点上的 `dcgmi`/libdcgm 与驱动 DCGM 版本不一致，需安装与当前 NVIDIA 驱动匹配的 Data Center GPU Manager（或使用发行版/驱动自带的 `dcgmi`）。
 - nvbandwidth：H2D/D2H 与 GPU D2D 使用不同矩阵解析；前端结果表分两行展示并分别对照 `config/gpu-benchmarks.json` 中的 `h2d_d2h` 与 `d2d`。
 - 后端默认输出到标准输出，可自行接入 `gunicorn` 或 supervisor。
 - 前端建议使用 `pnpm dev` 进行实时调试。

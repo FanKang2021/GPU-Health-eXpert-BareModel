@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import tarfile
 import tempfile
@@ -307,13 +308,45 @@ class SSHSession:
         exit_code = stdout.channel.recv_exit_status()
         return SSHCommandResult(command=command, exit_code=exit_code, stdout=stdout_str, stderr=stderr_str)
 
+    def ensure_remote_dir_for_sftp(self, remote_dir: str) -> None:
+        """创建远端目录并保证当前 SSH 用户可向其 SFTP 写入。
+
+        非 root 账号常遇：仅执行了 mkdir 未检查退出码，或目录由 root 创建导致 SFTP put 报 [Errno 2]/权限错误。
+        """
+        q = shlex.quote(remote_dir)
+        r = self.run(f"mkdir -p {q}")
+        if r.exit_code != 0 and self.need_sudo:
+            r = self.run(f"mkdir -p {q}", require_root=True)
+        if r.exit_code != 0:
+            raise RuntimeError(
+                f"无法在远端创建目录 {remote_dir}（多机主节点/上传前请先保证可写）。"
+                f"stderr: {r.stderr or r.stdout or ''}"
+            )
+        if self.need_sudo:
+            un = self.run("id -un").stdout.strip()
+            if un:
+                co = self.run(f"chown {shlex.quote(un)}:{shlex.quote(un)} {q}", require_root=True)
+                if co.exit_code != 0:
+                    logger.warning(
+                        "chown %s 失败，SFTP 可能无法写入: %s", remote_dir, co.stderr or co.stdout or ""
+                    )
+        tw = self.run(f"test -w {q} && echo OK || echo NO")
+        if tw.stdout.strip() != "OK":
+            raise RuntimeError(
+                f"远端目录 {remote_dir} 对当前 SSH 用户不可写，无法 SFTP 上传（需配置 sudo 以 chown 或改用 root）。"
+                f"输出: {tw.stdout or ''} {tw.stderr or ''}"
+            )
+
     def upload(self, local_path: Path, remote_path: str, executable: bool = False):
         remote_dir = Path(remote_path).parent.as_posix()
-        self.run(f"mkdir -p {remote_dir}")
+        if not local_path.exists():
+            raise FileNotFoundError(f"本地文件不存在: {local_path}")
+        self.ensure_remote_dir_for_sftp(remote_dir)
         posix_local = str(local_path)
         self.sftp.put(posix_local, remote_path)
         if executable:
-            self.run(f"chmod +x {remote_path}", require_root=self.need_sudo)
+            # SFTP 上传的文件属主为当前 SSH 用户，无需 sudo；误用 sudo 且未配置 NOPASSWD 时会导致未授权或异常
+            self.run(f"chmod +x {shlex.quote(remote_path)}", require_root=False)
     
     def upload_directory(self, local_dir: Path, remote_dir: str):
         """递归上传整个目录到远程"""
@@ -494,7 +527,9 @@ class RemoteNodeRunner:
         self.tests = tests
         self.dcgm_level = dcgm_level
         self.connection = connection
-        self.remote_dir = "/tmp/ghx"
+        self.remote_dir = (os.getenv("GHX_REMOTE_DIR") or "/tmp/ghx").strip() or "/tmp/ghx"
+        # nccl-tests 构建根目录：可与 remote_dir 不同（例如上传在 ~/.ghx-bare，复用多机在 /tmp/ghx 的编译产物）
+        self.nccl_root = self.remote_dir
         self.logs: List[str] = []
         self.session: Optional[SSHSession] = None
         self.cancelled = cancelled_flag or threading.Event()
@@ -513,6 +548,51 @@ class RemoteNodeRunner:
         if not gpu_type:
             return None
         return GPU_BENCHMARKS.get(gpu_type, {}).get(metric)
+
+    def _ensure_remote_workspace(self, session: SSHSession) -> None:
+        """保证远程工作目录可对当前 SSH 用户写入；/tmp/ghx 常被 root 独占时需回退到 ~/.ghx-bare。"""
+        primary = (os.getenv("GHX_REMOTE_DIR") or "").strip() or "/tmp/ghx"
+        self.remote_dir = primary
+        pq = shlex.quote(primary)
+        probe = session.run(f"mkdir -p {pq} && test -w {pq} && echo OK || echo NO")
+        if probe.stdout.strip() == "OK":
+            return
+        home = session.run('getent passwd "$(id -un)" | cut -d: -f6').stdout.strip()
+        if not home:
+            self.log(
+                "警告: 首选远程目录对当前用户不可写且无法解析主目录，上传工具可能出现 Permission denied；"
+                "请在运行后端的进程环境中设置 GHX_REMOTE_DIR 为节点上可写路径"
+            )
+            return
+        fb = f"{home}/.ghx-bare"
+        fq = shlex.quote(fb)
+        session.run(f"mkdir -p {fq}")
+        probe2 = session.run(f"test -w {fq} && echo OK || echo NO")
+        if probe2.stdout.strip() == "OK":
+            self.log(f"远程目录 {primary} 对当前用户不可写，已改用 {fb}")
+            self.remote_dir = fb
+        else:
+            self.log(
+                f"警告: {primary} 与 {fb} 均不可写，nvbandwidth/IB 上传可能失败；请调整目录权限或设置 GHX_REMOTE_DIR"
+            )
+
+    def _resolve_nccl_build_root(self, session: SSHSession) -> None:
+        """多机 MPI 流程固定使用 /tmp/ghx；单机若因权限改用 ~/.ghx-bare，但节点上已有 /tmp/ghx 下 nccl-tests，则复用以避免重复编译。"""
+        canonical = "/tmp/ghx"
+        local_bin = f"{self.remote_dir}/nccl-tests/build/all_reduce_perf"
+        std_bin = f"{canonical}/nccl-tests/build/all_reduce_perf"
+        if session.run(f"test -f {shlex.quote(local_bin)} && echo OK || echo NO").stdout.strip() == "OK":
+            self.nccl_root = self.remote_dir
+            return
+        if session.run(f"test -f {shlex.quote(std_bin)} && echo OK || echo NO").stdout.strip() == "OK":
+            if self.remote_dir.rstrip("/") != canonical.rstrip("/"):
+                self.log(
+                    f"工作目录为 {self.remote_dir}（用于上传 nvbandwidth 等），"
+                    f"检测到已有 {std_bin}，单节点 NCCL 将复用该构建，与多机任务目录一致"
+                )
+            self.nccl_root = canonical
+            return
+        self.nccl_root = self.remote_dir
 
     def execute(self) -> Dict[str, Any]:
         results: Dict[str, Any] = {}
@@ -538,7 +618,9 @@ class RemoteNodeRunner:
                     "gpuType": self.node_meta.get("gpuType", "Unknown"),
                 }
             
-            session.run(f"mkdir -p {self.remote_dir}")
+            self._ensure_remote_workspace(session)
+            if "nccl" in self.tests:
+                self._resolve_nccl_build_root(session)
 
             gpu_info = self._query_gpu_info()
             self.node_meta["gpuType"] = gpu_info["model"]
@@ -760,12 +842,14 @@ class RemoteNodeRunner:
             if gpu_count == 0:
                 raise RuntimeError("未检测到GPU，无法运行NCCL测试")
             
-            # 检查nccl-tests是否已编译
-            check_res = self.session.run(f"[ -f {self.remote_dir}/nccl-tests/build/all_reduce_perf ] && echo OK || echo MISSING")
+            # 检查 nccl-tests 是否已在 nccl_root 下编译（可能与可上传的 remote_dir 不一致）
+            check_res = self.session.run(
+                f"[ -f {shlex.quote(self.nccl_root + '/nccl-tests/build/all_reduce_perf')} ] && echo OK || echo MISSING"
+            )
             if check_res.stdout.strip() == "OK":
                 self.log("nccl-tests 已存在，跳过编译")
             else:
-                # 上传并编译 nccl 和 nccl-tests
+                # 上传并编译 nccl 和 nccl-tests（仅写入可写的 remote_dir）
                 nccl_tgz = ASSETS["nccl"]
                 nccl_tests_tgz = ASSETS["nccl_tests"]
                 
@@ -846,11 +930,12 @@ echo "编译完成"
                 compile_result = self.session.run(compile_script, timeout=600, require_root=True)
                 if compile_result.exit_code != 0:
                     raise RuntimeError(f"编译失败: {compile_result.stderr or compile_result.stdout}")
-            
+                self.nccl_root = self.remote_dir
+
             # 运行 NCCL 测试
             self.log("运行 NCCL 测试")
             test_script = f"""
-{self.remote_dir}/nccl-tests/build/all_reduce_perf -b 1024 -e 1G -f 2 -g {gpu_count}
+{shlex.quote(self.nccl_root + '/nccl-tests/build/all_reduce_perf')} -b 1024 -e 1G -f 2 -g {gpu_count}
 """
             result = self.session.run(test_script, timeout=600, require_root=True)
             if result.exit_code != 0:
@@ -880,6 +965,12 @@ echo "编译完成"
             passed = result.exit_code == 0
             status = "passed" if passed else "failed"
             self.log(f"DCGM诊断完成，状态: {status}")
+            raw = (result.stdout or "") + (result.stderr or "")
+            if not passed and "API version mismatch" in raw:
+                self.log(
+                    "DCGM 提示 API 版本不匹配：节点上 dcgmi/libdcgm 与驱动内置 DCGM 接口版本不一致。"
+                    "请使用与当前 NVIDIA 驱动匹配的 Data Center GPU Manager（或与驱动捆绑的 dcgmi）"
+                )
             return {
                 "status": status,
                 "passed": passed,
@@ -893,13 +984,11 @@ echo "编译完成"
     def _run_ib_check(self) -> Dict[str, Any]:
         try:
             remote_script = self._upload_asset("ib_check", "ib_health_check.sh")
-            # 确保脚本可执行
-            self.session.run(f"chmod +x {remote_script}", require_root=True)
             cmd = (
-                f"cd {self.remote_dir} && "
+                f"cd {shlex.quote(self.remote_dir)} && "
                 "export TERM=xterm; "
                 "export PATH=\"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/ib_health_check:$PATH\"; "
-                f"{remote_script}"
+                f"bash {shlex.quote(remote_script)}"
             )
             result = self.session.run(cmd, timeout=900, require_root=True)
             output = (result.stdout or "") + (result.stderr or "")
@@ -1696,10 +1785,10 @@ def run_multi_node_nccl_task(test_id: str, payload: Dict[str, Any]):
 
         mpi_command = "\n".join([mpi_cmd_parts[0], " \\\n".join(mpi_cmd_parts[1:])])
         
-        # 连接主节点执行
+        # 连接主节点执行（首节点需可写 /tmp/ghx 或使用 sudo 将目录属主交给 SSH 用户，否则 SFTP 上传 nccl 会失败）
         with SSHSession(connection) as session:
-            session.run("mkdir -p /tmp/ghx")
-            
+            session.ensure_remote_dir_for_sftp("/tmp/ghx")
+
             if hostfile_content:
                 hostfile_path = "/tmp/ghx/hostfile"
                 session.run(f"cat > {hostfile_path} << 'EOF'\n{hostfile_content}\nEOF")
