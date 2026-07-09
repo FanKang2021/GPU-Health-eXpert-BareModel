@@ -19,11 +19,11 @@ JSON_OUTPUT=false
 
 # 颜色定义
 if [[ "$USE_COLOR" == true ]]; then
-    RED='\033[0;31m'
-    GREEN='\033[0;32m'
-    YELLOW='\033[1;33m'
-    BLUE='\033[0;34m'
-    NC='\033[0m' # No Color
+    RED=$'\033[0;31m'
+    GREEN=$'\033[0;32m'
+    YELLOW=$'\033[1;33m'
+    BLUE=$'\033[0;34m'
+    NC=$'\033[0m' # No Color
 else
     RED=''
     GREEN=''
@@ -119,11 +119,11 @@ parse_arguments() {
 
     # 重新初始化颜色
     if [[ "$USE_COLOR" == true ]]; then
-        RED='\033[0;31m'
-        GREEN='\033[0;32m'
-        YELLOW='\033[1;33m'
-        BLUE='\033[0;34m'
-        NC='\033[0m'
+        RED=$'\033[0;31m'
+        GREEN=$'\033[0;32m'
+        YELLOW=$'\033[1;33m'
+        BLUE=$'\033[0;34m'
+        NC=$'\033[0m'
     else
         RED=''
         GREEN=''
@@ -339,8 +339,9 @@ extract_nccl_cuda_version() {
     local pkg="$2"
     local line
 
-    line=$(echo "$output" | grep -E "^${pkg}/" | grep '\[installed\]' | head -1)
+    line=$(echo "$output" | grep -E "^${pkg}/" | grep '\[installed' | head -1)
     # 格式示例: libnccl2/unknown,now 2.26.2-1+cuda12.8 amd64 [installed]
+    # 也可能为: [installed,upgradable to: 2.27.3-1+cuda12.9]
     echo "$line" | grep -oE 'cuda[0-9]+\.[0-9]+' | head -1 | sed 's/cuda//'
 }
 

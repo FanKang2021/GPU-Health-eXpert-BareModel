@@ -375,10 +375,28 @@ class SSHSession:
 # -----------------------------------------------------------------------------
 
 
+def _nvbandwidth_row_is_gpu_index_header(nums: List[float]) -> bool:
+    """
+    识别 nvbandwidth CE 矩阵的「列索引」表头行（如 0 1 2 ... 7）。
+    与 ghx-check/gpu_check_job 一致：这些整数会落入带宽过滤区间，导致最小值被压到 5～7 GB/s。
+    判据：数字均为整数，且排序后等于从某一起点开始的连续整数序列。
+    """
+    if len(nums) < 2:
+        return False
+    for n in nums:
+        if abs(n - round(n)) > 1e-5:
+            return False
+    ints = sorted(int(round(x)) for x in nums)
+    if ints[0] < 0 or ints[-1] > 256:
+        return False
+    expected = list(range(ints[0], ints[0] + len(ints)))
+    return ints == expected
+
+
 def parse_nvbandwidth_h2d_d2h_memcpy_ce(output: str) -> float:
     """
     解析 nvbandwidth -t 2 / -t 3（host/device bidirectional memcpy CE）矩阵。
-    跳过表头下一行的「列 GPU 索引」行：该行以 0 开头且单元格为无小数整数 0–32，会被误判为带宽。
+    跳过「列 GPU 索引」整行（连续整数 0..N-1），避免5、6、7 等被当作 GB/s。
     """
     values: List[float] = []
     in_matrix = False
@@ -394,18 +412,21 @@ def parse_nvbandwidth_h2d_d2h_memcpy_ce(output: str) -> float:
         if not s or not s[0].isdigit():
             continue
         parts = s.split()
-        if len(parts) < 2:
+        if len(parts) < 3:
             continue
+        raw_values: List[float] = []
         for part in parts[1:]:
             if part.upper() in ("N/A", "NA", "-"):
                 continue
             try:
-                value = float(part)
+                raw_values.append(float(part))
             except ValueError:
                 continue
-            # 列标题里的 GPU 序号（无小数，数值较小）
-            if "." not in part and "e" not in part.lower() and value == int(value) and 0 <= value <= 32:
-                continue
+        if not raw_values:
+            continue
+        if _nvbandwidth_row_is_gpu_index_header(raw_values):
+            continue
+        for value in raw_values:
             if 5.0 <= value <= 300.0:
                 values.append(value)
     return min(values) if values else 0.0
