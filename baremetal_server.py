@@ -1619,6 +1619,21 @@ def api_setup_ssh_trust():
                     
                     # 配置 ssh_config 禁用 StrictHostKeyChecking
                     session.run("grep -q 'StrictHostKeyChecking' /etc/ssh/ssh_config || echo 'StrictHostKeyChecking no' >> /etc/ssh/ssh_config", require_root=True)
+
+                    # 配置 ~/.ssh/config 使用 ghx 生成的密钥，避免与系统其他公钥冲突
+                    ssh_config_content = """# BEGIN GHX MANAGED - SSH Passwordless Config
+Host *
+    StrictHostKeyChecking no
+    UserKnownHostsFile /root/.ssh/known_hosts
+    IdentityFile /root/.ssh/id_rsa
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+# END GHX MANAGED - SSH Passwordless Config"""
+                    session.run(
+                        f"cat > /root/.ssh/config <<'EOF'\n{ssh_config_content}\nEOF\n"
+                        "chmod 600 /root/.ssh/config",
+                        require_root=True,
+                    )
                     
                     # 预填充 known_hosts（使用内网IP扫描所有节点）
                     all_ips_str = " ".join(all_internal_ips)
