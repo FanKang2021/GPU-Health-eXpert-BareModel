@@ -30,6 +30,8 @@ import {
   Upload,
   X,
   XCircle,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react"
 import JSZip from "jszip"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -102,6 +104,7 @@ interface JobMetric {
   passed?: boolean
   message?: string
   details?: NvbandwidthMetricDetails
+  phases?: Record<string, { name: string; passed: boolean; issues: string[] }>
 }
 
 interface JobNodeStatus {
@@ -640,7 +643,8 @@ export default function BareMetal() {
     }
   }, [])
   const [logViewer, setLogViewer] = useState({ open: false, content: "", title: "" })
-  
+  const [expandedIbRows, setExpandedIbRows] = useState<Set<string>>(new Set())
+
   // 多机测试相关状态
   const [multiNodeConfig, setMultiNodeConfig] = useState({
     btlTcpIf: "bond0",
@@ -2556,11 +2560,67 @@ export default function BareMetal() {
                             : renderMetric(undefined, "GB/s", language)}
                       </td>
                       <td className="py-3 px-4">
-                          {result.ib
-                            ? renderStatusBadge(result.ib.status || (result.ib.passed ? "passed" : "failed"), language)
-                            : renderMetric(undefined, "GB/s", language)}
+                          {result.ib ? (
+                            <div className="flex flex-col gap-1">
+                              <div className="flex items-center gap-1">
+                                {renderStatusBadge(result.ib.status || (result.ib.passed ? "passed" : "failed"), language)}
+                                {result.ib.phases && Object.values(result.ib.phases).some((p) => !p.passed) && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      setExpandedIbRows((prev) => {
+                                        const next = new Set(prev)
+                                        if (next.has(result.id)) {
+                                          next.delete(result.id)
+                                        } else {
+                                          next.add(result.id)
+                                        }
+                                        return next
+                                      })
+                                    }}
+                                    className="text-slate-400 hover:text-white"
+                                    title={tr("展开/收起 阶段详情", "Expand/Collapse phase details")}
+                                  >
+                                    {expandedIbRows.has(result.id) ? (
+                                      <ChevronDown className="w-4 h-4" />
+                                    ) : (
+                                      <ChevronRight className="w-4 h-4" />
+                                    )}
+                                  </button>
+                                )}
+                              </div>
+                              {result.ib.phases && Object.values(result.ib.phases).some((p) => !p.passed) && (
+                                <div className="text-xs text-red-300 max-w-[200px]">
+                                  {Object.values(result.ib.phases)
+                                    .filter((p) => !p.passed)
+                                    .map((p) => p.name)
+                                    .join(", ")}
+                                </div>
+                              )}
+                              {result.ib.phases && expandedIbRows.has(result.id) && (
+                                <div className="mt-1 p-2 bg-slate-800/50 rounded text-xs max-w-[300px]">
+                                  {Object.values(result.ib.phases).map((phase) => (
+                                    <div key={phase.name} className="mb-1">
+                                      <span className={phase.passed ? "text-green-400" : "text-red-400"}>
+                                        {phase.passed ? "✅" : "❌"} {phase.name}
+                                      </span>
+                                      {!phase.passed && phase.issues.length > 0 && (
+                                        <ul className="ml-4 mt-0.5 text-red-300 list-disc list-inside">
+                                          {phase.issues.map((issue, idx) => (
+                                            <li key={idx}>{issue}</li>
+                                          ))}
+                                        </ul>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            renderMetric(undefined, "GB/s", language)
+                          )}
                       </td>
-                        <td className="py-3 px-4">{renderStatusBadge(result.status, language)}</td>
+                      <td className="py-3 px-4">{renderStatusBadge(result.status, language)}</td>
                       <td className="py-3 px-4">
                         <Button
                           size="sm"

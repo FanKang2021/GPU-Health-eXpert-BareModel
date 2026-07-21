@@ -1,0 +1,114 @@
+
+╔══════════════════════════════════════════════════════════╗
+║       � 智算节点健康检测（GPU + IB + PCIe）            ║
+║       2026-07-21 10:52:10                                ║
+╚══════════════════════════════════════════════════════════╝
+
+  主机名: hd02-gpu1-0001
+  内核:   5.15.0-126-generic
+  CPU:    INTEL(R) XEON(R) PLATINUM 8558
+
+▶ GPU 掉卡检测（硬件枚举 vs 驱动可见）
+  ----------------------------------------
+  硬件可见 (lspci):      8 张
+  驱动可见 (nvidia-smi):  8 张
+  ✅ 所有 GPU 正常在线（8 张）
+
+▶ GPU PCIe 链路状态
+  ----------------------------------------
+  GPU | 型号                       | 设计链路    | 当前链路    | 带宽估算  | 状态
+  ----|----------------------------|-------------|-------------|-----------|----------
+  0    | H100 80GB HBM3             | Gen5 x16   | Gen5 x16   | ~ 64 GB/s | 正常
+  1    | H100 80GB HBM3             | Gen5 x16   | Gen5 x16   | ~ 64 GB/s | 正常
+  2    | H100 80GB HBM3             | Gen5 x16   | Gen5 x16   | ~ 64 GB/s | 正常
+  3    | H100 80GB HBM3             | Gen5 x16   | Gen5 x16   | ~ 64 GB/s | 正常
+  4    | H100 80GB HBM3             | Gen5 x16   | Gen5 x16   | ~ 64 GB/s | 正常
+  5    | H100 80GB HBM3             | Gen5 x16   | Gen5 x16   | ~ 64 GB/s | 正常
+  6    | H100 80GB HBM3             | Gen5 x16   | Gen5 x16   | ~ 64 GB/s | 正常
+  7    | H100 80GB HBM3             | Gen5 x16   | Gen5 x16   | ~ 64 GB/s | 正常
+
+▶ IB 端口链路状态（全部端口）
+  ----------------------------------------
+  CA 设备        | 端口   | 类型   | 物理链路 | 状态        | 速率   | 判定
+  ---------------|--------|--------|----------|-------------|--------|----------
+  ib6s200p0      | port 1  | MT4123 | LinkUp   | Active      | 200G   | 正常
+  ib7s400p0      | port 1  | MT4129 | LinkUp   | Active      | 400G   | 正常
+  ib7s400p1      | port 1  | MT4129 | LinkUp   | Active      | 400G   | 正常
+  ib7s400p2      | port 1  | MT4129 | LinkUp   | Active      | 400G   | 正常
+  ib7s400p3      | port 1  | MT4129 | LinkUp   | Active      | 400G   | 正常
+  ib7s400p4      | port 1  | MT4129 | LinkUp   | Active      | 400G   | 正常
+  ib7s400p5      | port 1  | MT4129 | LinkUp   | Active      | 400G   | 正常
+  ib7s400p6      | port 1  | MT4129 | LinkUp   | Active      | 400G   | 正常
+  ib7s400p7      | port 1  | MT4129 | LinkUp   | Active      | 400G   | 正常
+  mlx5_bond_0    | port 1  | MT4119 | LinkUp   | Active      | 25G    | 正常
+
+▶ InfiniBand (≥400G Active) PCIe 链路
+  ----------------------------------------
+
+  IB: ib7s400p0 (MT4129, 400G)
+  PCI 地址: 0000:19:00.0
+  PCIe Cap: Speed 32GT/s (Gen5) Width x16
+  PCIe Sta: Speed 32GT/s (Gen5) Width x16
+  ✅ PCIe 速度正常: Gen5 (32 GT/s)
+  ✅ PCIe 宽度正常: x16
+  ✅ PCIe 带宽充足: ~64 GB/s ≥ 50 GB/s
+
+  IB: ib7s400p1 (MT4129, 400G)
+  PCI 地址: 0000:29:00.0
+  PCIe Cap: Speed 32GT/s (Gen5) Width x16
+  PCIe Sta: Speed 32GT/s (Gen5) Width x16
+  ✅ PCIe 速度正常: Gen5 (32 GT/s)
+  ✅ PCIe 宽度正常: x16
+  ✅ PCIe 带宽充足: ~64 GB/s ≥ 50 GB/s
+
+  IB: ib7s400p2 (MT4129, 400G)
+  PCI 地址: 0000:3b:00.0
+  PCIe Cap: Speed 32GT/s (Gen5) Width x16
+  PCIe Sta: Speed 32GT/s (Gen5) Width x16
+  ✅ PCIe 速度正常: Gen5 (32 GT/s)
+  ✅ PCIe 宽度正常: x16
+  ✅ PCIe 带宽充足: ~64 GB/s ≥ 50 GB/s
+
+  IB: ib7s400p3 (MT4129, 400G)
+  PCI 地址: 0000:5c:00.0
+  PCIe Cap: Speed 32GT/s (Gen5) Width x16
+  PCIe Sta: Speed 32GT/s (Gen5) Width x16
+  ✅ PCIe 速度正常: Gen5 (32 GT/s)
+  ✅ PCIe 宽度正常: x16
+  ✅ PCIe 带宽充足: ~64 GB/s ≥ 50 GB/s
+
+  IB: ib7s400p4 (MT4129, 400G)
+  PCI 地址: 0000:9b:00.0
+  PCIe Cap: Speed 32GT/s (Gen5) Width x16
+  PCIe Sta: Speed 32GT/s (Gen5) Width x16
+  ✅ PCIe 速度正常: Gen5 (32 GT/s)
+  ✅ PCIe 宽度正常: x16
+  ✅ PCIe 带宽充足: ~64 GB/s ≥ 50 GB/s
+
+  IB: ib7s400p5 (MT4129, 400G)
+  PCI 地址: 0000:aa:00.0
+  PCIe Cap: Speed 32GT/s (Gen5) Width x16
+  PCIe Sta: Speed 32GT/s (Gen5) Width x16
+  ✅ PCIe 速度正常: Gen5 (32 GT/s)
+  ✅ PCIe 宽度正常: x16
+  ✅ PCIe 带宽充足: ~64 GB/s ≥ 50 GB/s
+
+  IB: ib7s400p6 (MT4129, 400G)
+  PCI 地址: 0000:bb:00.0
+  PCIe Cap: Speed 32GT/s (Gen5) Width x16
+  PCIe Sta: Speed 32GT/s (Gen5) Width x16
+  ✅ PCIe 速度正常: Gen5 (32 GT/s)
+  ✅ PCIe 宽度正常: x16
+  ✅ PCIe 带宽充足: ~64 GB/s ≥ 50 GB/s
+
+  IB: ib7s400p7 (MT4129, 400G)
+  PCI 地址: 0000:da:00.0
+  PCIe Cap: Speed 32GT/s (Gen5) Width x16
+  PCIe Sta: Speed 32GT/s (Gen5) Width x16
+  ✅ PCIe 速度正常: Gen5 (32 GT/s)
+  ✅ PCIe 宽度正常: x16
+  ✅ PCIe 带宽充足: ~64 GB/s ≥ 50 GB/s
+
+==================================================
+  ✅ 检测完成，未发现异常。
+==================================================

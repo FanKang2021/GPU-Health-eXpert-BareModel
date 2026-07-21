@@ -43,7 +43,7 @@ ASSETS = {
     "nccl": ASSET_DIR / "nccl.tgz",
     "nccl_tests": ASSET_DIR / "nccl-tests.tgz",
     "nccl_sharp_plugins": ASSET_DIR / "nccl-rdma-sharp-plugins.tgz",
-    "ib_check": ASSET_DIR / "ib_health_check.sh",
+    "ib_check": ASSET_DIR / "gpuIBPcieDiag.sh",
 }
 
 for name, path in ASSETS.items():
@@ -1004,7 +1004,7 @@ echo "编译完成"
 
     def _run_ib_check(self) -> Dict[str, Any]:
         try:
-            remote_script = self._upload_asset("ib_check", "ib_health_check.sh")
+            remote_script = self._upload_asset("ib_check", "gpuIBPcieDiag.sh")
             cmd = (
                 f"cd {shlex.quote(self.remote_dir)} && "
                 "export TERM=xterm; "
@@ -1013,15 +1013,60 @@ echo "编译完成"
             )
             result = self.session.run(cmd, timeout=900, require_root=True)
             output = (result.stdout or "") + (result.stderr or "")
-            passed = result.exit_code == 0 and "通过模块: 10/10" in output
+
+            # 解析四个阶段的通过情况，用于前端展示具体未通过项
+            phases = {
+                "gpu_presence": {
+                    "name": "GPU 掉卡检测",
+                    "pattern": re.compile(r"GPU 掉卡检测"),
+                    "passed": False,
+                    "issues": [],
+                },
+                "gpu_pcie": {
+                    "name": "GPU PCIe 链路状态",
+                    "pattern": re.compile(r"GPU PCIe 链路状态"),
+                    "passed": False,
+                    "issues": [],
+                },
+                "ib_port": {
+                    "name": "IB 端口链路状态",
+                    "pattern": re.compile(r"IB 端口链路状态"),
+                    "passed": False,
+                    "issues": [],
+                },
+                "ib_pcie": {
+                    "name": "IB PCIe 链路",
+                    "pattern": re.compile(r"InfiniBand .* PCIe 链路"),
+                    "passed": False,
+                    "issues": [],
+                },
+            }
+
+            current_phase = None
+            for line in output.splitlines():
+                stripped = line.strip()
+                # 识别阶段标题
+                for key, meta in phases.items():
+                    if meta["pattern"].search(stripped):
+                        current_phase = key
+                        break
+                # 收集 ❌ 开头的失败项
+                if current_phase and "❌" in stripped:
+                    phases[current_phase]["issues"].append(stripped.replace("❌", "").strip())
+
+            # 标记阶段通过情况：只要该阶段没有 ❌ 失败项，就认为通过
+            for key, meta in phases.items():
+                meta["passed"] = len(meta["issues"]) == 0
+
+            passed = result.exit_code == 0
             status = "passed" if passed else "failed"
             self.log(f"IB检查完成，状态: {status}")
-            if not passed and "通过模块: 10/10" in output:
-                status = "passed"
+
             return {
                 "status": status,
-                "passed": status == "passed",
+                "passed": passed,
                 "rawOutput": output.strip() or result.stderr or result.stdout,
+                "phases": {key: {"name": meta["name"], "passed": meta["passed"], "issues": meta["issues"]} for key, meta in phases.items()},
             }
         except Exception as exc:  # pylint: disable=broad-except
             self.log(f"IB检查失败: {exc}")
