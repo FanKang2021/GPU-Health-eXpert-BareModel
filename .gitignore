@@ -1,0 +1,25 @@
+# 依赖 / dependencies
+node_modules/
+.pnpm-store/
+
+# Next.js 构建产物 / build output
+.next/
+out/
+build/
+standalone/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 本地环境与日志 / local env & logs
+.env
+.env*.local
+*.log
+tsconfig.tsbuildinfo
+next-env.d.ts.bak
+
+# 运行期生成物 / runtime artifacts
+gpuIBPcieDiag.output

@@ -10,20 +10,24 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN sed -i 's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
-&& sed -i 's|http://snapshot.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
-    && apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     openssh-client \
   && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt baremetal_server.py ./ 
+COPY requirements.txt baremetal_server.py ./
 COPY nvbandwidth nccl.tgz nccl-tests.tgz nccl-rdma-sharp-plugins.tgz gpuIBPcieDiag.sh assets/
 COPY config/gpu-benchmarks.json config/
 
-RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+# 默认官方 PyPI；中国大陆可 --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PIP_INDEX_URL=https://pypi.org/simple
+RUN pip install --no-cache-dir -r requirements.txt -i ${PIP_INDEX_URL}
 
 EXPOSE ${PORT}
 
-CMD ["python", "baremetal_server.py"]
-
+# 生产运行：gunicorn 单进程多线程（gthread）。
+# 必须 -w 1：任务状态（jobs 字典）为进程内内存态，多 worker 会导致状态轮询打到别的进程而 404。
+# --threads 决定可并发处理的 HTTP 请求数（SSH 为 I/O 型，GIL 在 socket/加解密时释放，多线程可有效并发）。
+# 并发上限经环境变量调节：GHX_THREADS（HTTP 并发）、GHX_MAX_CONCURRENCY（单任务节点并发）。
+# 请求头上限抬到 64KB：经反向代理访问时可能累积较大 cookie/请求头，默认 8KB 易返回 431。
+CMD gunicorn -w 1 -k gthread --threads "${GHX_THREADS:-32}" -b "0.0.0.0:${PORT}" --timeout 120 --graceful-timeout 30 --limit-request-field_size 65536 --limit-request-fields 0 --access-logfile - --error-logfile - baremetal_server:app

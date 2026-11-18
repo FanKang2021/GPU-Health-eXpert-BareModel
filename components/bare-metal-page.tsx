@@ -32,10 +32,14 @@ import {
   XCircle,
   ChevronDown,
   ChevronRight,
+  Moon,
+  Sun,
 } from "lucide-react"
 import JSZip from "jszip"
+import ghxLogoUrl from "./ghx-logo.png"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { useToast } from "@/components/ui/use-toast"
+import { useTheme } from "next-themes"
 
 type AuthMethod = "password" | "privateKey"
 type CommandStatus = "idle" | "checking" | "available" | "missing"
@@ -165,7 +169,9 @@ function getApiBaseUrl(): string {
     if (origin.includes("localhost") || origin.includes("127.0.0.1")) {
       return "http://localhost:5000"
     }
-    return `${origin}/api`
+    // 调用路径已自带 /api 前缀（如 /api/ssh/...），故 base 用站点根，避免拼成 /api/api/...；
+    // 同源部署时 /api/* 由 next.config rewrites 转发到后端。
+    return origin
   }
 
   // 3. SSR 或未知环境，默认指向 /api，由上层代理处理
@@ -222,7 +228,6 @@ const downloadBlob = (filename: string, blob: Blob) => {
 }
 
 const API_BASE_URL = getApiBaseUrl()
-const LANGUAGE_STORAGE_KEY = "ghx-language"
 
 // 自动调整多行输入框高度，保持在合理范围
 const autoResizeTextarea = (element: HTMLTextAreaElement | null, minHeight = 96, maxHeight = 320) => {
@@ -261,19 +266,23 @@ async function apiRequest<T>(path: string, options: RequestInit = {}): Promise<T
 function AnimatedLogo() {
   return (
     <div className="flex items-center gap-3">
-      <div className="flex items-center justify-center w-12 h-12 bg-gradient-to-br from-blue-500/20 to-purple-500/20 rounded-lg border border-blue-500/30">
-        <Monitor className="w-6 h-6 text-blue-400" />
+      <div className="flex items-center justify-center w-12 h-12 rounded-2xl shadow-md shadow-indigo-200/60 dark:shadow-indigo-950/50 overflow-hidden">
+        <img
+          src={ghxLogoUrl.src}
+          alt="GHX"
+          className="w-full h-full object-cover"
+        />
       </div>
       <div className="flex flex-col">
         <div className="flex items-center gap-2">
-          <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 via-cyan-400 to-teal-400 bg-clip-text text-transparent">
+          <h1 className="text-xl font-semibold text-slate-800 dark:text-slate-100">
             GHealthX
           </h1>
           <div className="flex gap-1">
             {[0, 1, 2].map((i) => (
               <div
                 key={i}
-                className="w-1.5 h-1.5 rounded-full bg-cyan-400"
+                className="w-1.5 h-1.5 rounded-full bg-indigo-300 dark:bg-indigo-500"
                 style={{
                   animation: `pulse 1.5s ease-in-out ${i * 0.2}s infinite`,
                 }}
@@ -282,8 +291,8 @@ function AnimatedLogo() {
           </div>
         </div>
         <div className="flex items-center gap-2 mt-0.5">
-          <span className="text-xs text-cyan-400/80">GPU Health Expert</span>
-          <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-green-500/50 text-green-400">
+          <span className="text-xs text-slate-500 dark:text-slate-400">GPU Health Expert</span>
+          <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-emerald-200 dark:border-emerald-500/40 bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
             LIVE
           </Badge>
         </div>
@@ -426,13 +435,13 @@ const STATUS_LABELS = {
 const renderNvbandwidthMetric = (metric?: JobMetric, unitHint = "GB/s", lang: "zh" | "en" = "zh") => {
   const labels = METRIC_LABELS[lang]
   if (!metric) {
-    return <span className="text-slate-500 text-xs">{labels.notRun}</span>
+    return <span className="text-slate-400 dark:text-slate-500 text-xs">{labels.notRun}</span>
   }
   if (metric.status === "error") {
-    return <span className="text-red-400 text-xs">{metric.message || labels.error}</span>
+    return <span className="text-rose-600 dark:text-rose-400 text-xs">{metric.message || labels.error}</span>
   }
   if (metric.status === "skipped") {
-    return <span className="text-slate-400 text-xs">{labels.skipped}</span>
+    return <span className="text-slate-500 dark:text-slate-400 text-xs">{labels.skipped}</span>
   }
   const d = metric.details
   const unit = metric.unit || unitHint
@@ -452,14 +461,14 @@ const renderNvbandwidthMetric = (metric?: JobMetric, unitHint = "GB/s", lang: "z
   const line = (label: string, v: number, bench: number | undefined, ok: boolean) => (
     <div key={label} className="flex flex-col gap-0.5">
       <div className="flex items-center gap-1 flex-wrap">
-        <span className="text-slate-400 text-[10px] uppercase">{label}</span>
-        <span className="text-white text-xs">
+        <span className="text-slate-500 dark:text-slate-400 text-[10px] uppercase">{label}</span>
+        <span className="text-slate-700 dark:text-slate-200 text-xs">
           {v.toFixed(1)} {unit}
         </span>
-        {ok ? <CheckCircle2 className="w-3.5 h-3.5 text-green-400" /> : <XCircle className="w-3.5 h-3.5 text-red-400" />}
+        {ok ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" /> : <XCircle className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400" />}
       </div>
       {bench != null && (
-        <span className="text-[10px] text-slate-500 pl-0">
+        <span className="text-[10px] text-slate-400 dark:text-slate-500 pl-0">
           {labels.benchmark}: {bench} {unit}
         </span>
       )}
@@ -477,28 +486,28 @@ const renderNvbandwidthMetric = (metric?: JobMetric, unitHint = "GB/s", lang: "z
 const renderMetric = (metric?: JobMetric, unitHint = "GB/s", lang: "zh" | "en" = "zh") => {
   const labels = METRIC_LABELS[lang]
   if (!metric) {
-    return <span className="text-slate-500 text-xs">{labels.notRun}</span>
+    return <span className="text-slate-400 dark:text-slate-500 text-xs">{labels.notRun}</span>
   }
   if (metric.status === "error") {
-    return <span className="text-red-400 text-xs">{metric.message || labels.error}</span>
+    return <span className="text-rose-600 dark:text-rose-400 text-xs">{metric.message || labels.error}</span>
   }
   if (metric.status === "skipped") {
-    return <span className="text-slate-400 text-xs">{labels.skipped}</span>
+    return <span className="text-slate-500 dark:text-slate-400 text-xs">{labels.skipped}</span>
   }
   if (typeof metric.value !== "number") {
-    return <span className="text-slate-300 text-xs">{metric.status || "--"}</span>
+    return <span className="text-slate-600 dark:text-slate-300 text-xs">{metric.status || "--"}</span>
   }
   const valueText = `${metric.value.toFixed(1)} ${metric.unit || unitHint}`
   const passed = metric.passed !== false && (metric.status === "passed" || (metric.benchmark && metric.value >= metric.benchmark))
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center gap-2">
-        <span className="text-white">{valueText}</span>
-        {passed && <CheckCircle2 className="w-4 h-4 text-green-400 flex-shrink-0" />}
-        {!passed && metric.status === "failed" && <XCircle className="w-4 h-4 text-red-400 flex-shrink-0" />}
+        <span className="text-slate-700 dark:text-slate-200">{valueText}</span>
+        {passed && <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 flex-shrink-0" />}
+        {!passed && metric.status === "failed" && <XCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 flex-shrink-0" />}
       </div>
       {metric.benchmark && (
-        <span className="text-xs text-slate-400">
+        <span className="text-xs text-slate-500 dark:text-slate-400">
           {labels.benchmark}: {metric.benchmark} {metric.unit || unitHint}
         </span>
       )}
@@ -511,7 +520,7 @@ const renderStatusBadge = (status: string, lang: "zh" | "en" = "zh") => {
   const normalized = status?.toLowerCase()
   if (normalized === "passed" || normalized === "success" || normalized === "completed") {
     return (
-      <Badge className="bg-green-500/20 text-green-400 border border-green-500/40">
+      <Badge className="bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/40">
         <CheckCircle2 className="w-3 h-3 mr-1" />
         {labels.passed}
       </Badge>
@@ -519,7 +528,7 @@ const renderStatusBadge = (status: string, lang: "zh" | "en" = "zh") => {
   }
   if (normalized === "running") {
     return (
-      <Badge className="bg-blue-500/20 text-blue-400 border border-blue-500/40">
+      <Badge className="bg-indigo-50 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-500/40">
         <Loader2 className="w-3 h-3 mr-1 animate-spin" />
         {labels.running}
       </Badge>
@@ -527,7 +536,7 @@ const renderStatusBadge = (status: string, lang: "zh" | "en" = "zh") => {
   }
   if (normalized === "cancelled") {
     return (
-      <Badge className="bg-orange-500/20 text-orange-400 border border-orange-500/40">
+      <Badge className="bg-orange-50 dark:bg-orange-500/10 text-orange-600 dark:text-orange-400 border border-orange-200 dark:border-orange-500/40">
         <XCircle className="w-3 h-3 mr-1" />
         {labels.cancelled}
       </Badge>
@@ -535,14 +544,14 @@ const renderStatusBadge = (status: string, lang: "zh" | "en" = "zh") => {
   }
   if (normalized === "cancelling") {
     return (
-      <Badge className="bg-yellow-500/20 text-yellow-400 border border-yellow-500/40">
+      <Badge className="bg-amber-50 dark:bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-500/40">
         <Loader2 className="w-3 h-3 mr-1 animate-spin" />
         {labels.cancelling}
       </Badge>
     )
   }
   return (
-    <Badge className="bg-red-500/20 text-red-400 border border-red-500/40">
+    <Badge className="bg-rose-50 dark:bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-500/40">
       <XCircle className="w-3 h-3 mr-1" />
       {labels.failed}
     </Badge>
@@ -575,7 +584,15 @@ const flattenJobNodes = (job: JobDetail): JobNodeResult[] => {
 
 export default function BareMetal() {
   const { toast } = useToast()
-  const [language, setLanguage] = useState<"zh" | "en">("zh")
+  const { resolvedTheme, setTheme } = useTheme()
+  const [themeMounted, setThemeMounted] = useState(false)
+  useEffect(() => setThemeMounted(true), [])
+  const [language, setLanguage] = useState<"zh" | "en">("en")
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const saved = localStorage.getItem("ghx-language")
+    if (saved === "zh" || saved === "en") setLanguage(saved)
+  }, [])
   const [authMethod, setAuthMethod] = useState<AuthMethod>("password")
   const [sshConfig, setSshConfig] = useState({
     alias: "",
@@ -629,19 +646,28 @@ export default function BareMetal() {
   const [currentJobId, setCurrentJobId] = useState<string | null>(null)
   const [currentJob, setCurrentJob] = useState<JobDetail | null>(null)
   const [isPollingJob, setIsPollingJob] = useState(false)
+  const [allRunningJobs, setAllRunningJobs] = useState<Array<{ jobId: string; status: string; nodes?: Array<{ host?: string }> }>>([])
+  // 运行中任务轮询：看到其他会话占用的节点，避免同节点并发冲突
+  useEffect(() => {
+    let alive = true
+    const load = async () => {
+      try {
+        const d = await apiRequest<Array<{ jobId: string; status: string; nodes?: Array<{ host?: string }> }>>("/api/gpu-inspection/jobs")
+        if (!alive) return
+        setAllRunningJobs((d || []).filter((j) => j.status === "running" || j.status === "pending"))
+      } catch { /* 轮询失败静默 */ }
+    }
+    load()
+    const t = setInterval(load, 6000)
+    return () => { alive = false; clearInterval(t) }
+  }, [])
+
   const [testResults, setTestResults] = useState<JobNodeResult[]>([])
   const [selectedResultIds, setSelectedResultIds] = useState<Set<string>>(new Set())
   const [resultsPage, setResultsPage] = useState(1)
   const [resultsPageSize] = useState(10)
   const [isExportingLogs, setIsExportingLogs] = useState(false)
   const tr = useCallback((zh: string, en: string) => (language === "zh" ? zh : en), [language])
-  useEffect(() => {
-    if (typeof window === "undefined") return
-    const saved = localStorage.getItem(LANGUAGE_STORAGE_KEY)
-    if (saved === "zh" || saved === "en") {
-      setLanguage(saved)
-    }
-  }, [])
   const [logViewer, setLogViewer] = useState({ open: false, content: "", title: "" })
   const [expandedIbRows, setExpandedIbRows] = useState<Set<string>>(new Set())
 
@@ -684,6 +710,8 @@ export default function BareMetal() {
   const [isSettingUpSshTrust, setIsSettingUpSshTrust] = useState(false)
   const [sshTrustResults, setSshTrustResults] = useState<Array<{ host: string; status: string; message: string }>>([])
   const [showSshTrustResults, setShowSshTrustResults] = useState(false)
+
+  const [showCmdInfo, setShowCmdInfo] = useState(false)
 
   // 从 localStorage 加载测试结果
   useEffect(() => {
@@ -1743,16 +1771,6 @@ export default function BareMetal() {
     }
   }, [currentJobId, toast])
 
-  const toggleLanguage = () => {
-    setLanguage((prev) => {
-      const next = prev === "zh" ? "en" : "zh"
-      if (typeof window !== "undefined") {
-        localStorage.setItem(LANGUAGE_STORAGE_KEY, next)
-      }
-      return next
-    })
-  }
-
   useEffect(() => {
     apiRequest<{ benchmarks: BenchmarkMap }>("/api/config/gpu-benchmarks")
       .then((data) => {
@@ -1769,45 +1787,70 @@ export default function BareMetal() {
       })
   }, [toast])
 
+  const toggleLanguage = () => {
+    setLanguage((prev) => {
+      const next = prev === "zh" ? "en" : "zh"
+      if (typeof window !== "undefined") {
+        localStorage.setItem("ghx-language", next)
+      }
+      return next
+    })
+  }
+
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-blue-950 to-slate-950">
-      <header className="border-b border-blue-500/20 bg-slate-950/50 backdrop-blur-xl">
+    <div className="min-h-screen bg-background">
+      <header className="border-b border-slate-200/70 dark:border-slate-700/70 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md">
         <div className="container mx-auto px-6 py-4">
           <div className="flex items-center justify-between">
             <AnimatedLogo />
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={toggleLanguage}
-              className="border-blue-500/30 text-blue-400 hover:bg-blue-500/10 bg-transparent"
-            >
-              🌐 {language === "zh" ? "中文" : "English"}
-            </Button>
+            <div className="flex items-center gap-3">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={toggleLanguage}
+                className="text-slate-500 dark:text-slate-400"
+              >
+                {language === "zh" ? "English" : "中文"}
+              </Button>
+              <Button
+                variant="outline"
+                size="icon"
+                aria-label={themeMounted && resolvedTheme === "dark" ? tr("切换到亮色模式", "Switch to light mode") : tr("切换到暗色模式", "Switch to dark mode")}
+                onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
+                className="text-slate-500 dark:text-slate-400"
+              >
+                {themeMounted && resolvedTheme === "dark" ? (
+                  <Sun className="w-4 h-4" />
+                ) : (
+                  <Moon className="w-4 h-4" />
+                )}
+              </Button>
+            </div>
           </div>
         </div>
       </header>
 
       <main className="container mx-auto px-6 py-8">
-        <div className="mb-8">
-          <h2 className="text-2xl font-bold text-white mb-2">{tr("裸金属专用版", "Bare-metal Edition")}</h2>
-          <p className="text-sm text-slate-400">{tr("通过SSH连接进行节点健康检查", "Run GPU health checks via SSH access")}</p>
+        <div className="mb-6">
+          <h2 className="text-2xl font-semibold text-slate-800 dark:text-slate-100 mb-2">{tr("裸金属专用版", "Bare-metal Edition")}</h2>
+          <p className="text-sm text-slate-500 dark:text-slate-400">{tr("通过SSH连接进行节点健康检查", "Run GPU health checks via SSH access")}</p>
         </div>
 
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-8">
-          <Card className="bg-slate-900/50 border-blue-500/20 p-6">
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-8 items-start">
+          <Card className="bg-white dark:bg-slate-900 border-0 shadow-soft p-6 md:p-8 xl:col-span-2">
             <div className="flex items-center gap-2 mb-6">
-              <Key className="w-5 h-5 text-cyan-400" />
-              <h3 className="text-lg font-semibold text-white">{tr("SSH配置", "SSH Configuration")}</h3>
+              <Key className="w-5 h-5 text-indigo-500 dark:text-indigo-400" />
+              <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100">{tr("SSH配置", "SSH Configuration")}</h3>
             </div>
-            <p className="text-sm text-slate-400 mb-6">
+            <p className="text-sm text-slate-500 dark:text-slate-400 mb-6">
               {tr("配置SSH连接信息以访问目标节点", "Configure SSH access to reach target nodes")}
             </p>
 
             <div className="space-y-4">
               <div>
-                <Label className="text-slate-300">
+                <Label className="text-slate-600 dark:text-slate-300">
                   {tr("节点地址", "Host Address")}
-                  <span className="text-xs text-slate-500 ml-2">{tr("(每行一个，不带端口则使用右侧端口)", "(one per line, uses port field if not specified)")}</span>
+                  <span className="text-xs text-slate-400 dark:text-slate-500 ml-2">{tr("(每行一个，不带端口则使用右侧端口)", "(one per line, uses port field if not specified)")}</span>
                 </Label>
                 <textarea
                   ref={hostTextareaRef}
@@ -1818,33 +1861,33 @@ export default function BareMetal() {
                     autoResizeTextarea(hostTextareaRef.current)
                   }}
                   placeholder={tr("192.168.1.1\n192.168.1.2:60114\n192.168.1.3:60125", "192.168.1.1\n192.168.1.2:60114\n192.168.1.3:60125")}
-                  className="w-full bg-slate-800/50 border border-slate-700 text-white rounded-md p-3 text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-blue-500/50 mt-2"
+                  className="w-full bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 rounded-xl p-3 text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-indigo-300/60 mt-2"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <Label className="text-slate-300">{tr("用户名", "Username")}</Label>
+                  <Label className="text-slate-600 dark:text-slate-300">{tr("用户名", "Username")}</Label>
                   <Input
                     value={sshConfig.username}
                     onChange={(e) => setSshConfig((prev) => ({ ...prev, username: e.target.value }))}
-                    className="bg-slate-800/50 border-slate-700 text-white mt-2"
+                    className="bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 mt-2"
                   />
                 </div>
                 <div>
-                  <Label className="text-slate-300">{tr("端口", "Port")}</Label>
+                  <Label className="text-slate-600 dark:text-slate-300">{tr("端口", "Port")}</Label>
                   <Input
                     value={sshConfig.port}
                     onChange={(e) => setSshConfig((prev) => ({ ...prev, port: e.target.value }))}
-                    className="bg-slate-800/50 border-slate-700 text-white mt-2"
+                    className="bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 mt-2"
                   />
                 </div>
               </div>
 
               <div>
-                <Label className="text-slate-300 mb-3 block">{tr("认证方式", "Authentication")}</Label>
+                <Label className="text-slate-600 dark:text-slate-300 mb-3 block">{tr("认证方式", "Authentication")}</Label>
                 <Tabs value={authMethod} onValueChange={(v) => setAuthMethod(v as AuthMethod)}>
-                  <TabsList className="grid w-full grid-cols-2 bg-slate-800/50">
+                  <TabsList className="grid w-full grid-cols-2 bg-slate-50 dark:bg-slate-800/60">
                     <TabsTrigger value="password">{tr("密码", "Password")}</TabsTrigger>
                     <TabsTrigger value="privateKey">{tr("私钥", "Private Key")}</TabsTrigger>
                   </TabsList>
@@ -1853,19 +1896,19 @@ export default function BareMetal() {
 
               {authMethod === "password" ? (
                 <div>
-                  <Label className="text-slate-300">{tr("SSH密码", "SSH Password")}</Label>
+                  <Label className="text-slate-600 dark:text-slate-300">{tr("SSH密码", "SSH Password")}</Label>
                   <div className="relative mt-2">
                   <Input
                       type={showPassword ? "text" : "password"}
                     value={sshConfig.password}
                       onChange={(e) => setSshConfig((prev) => ({ ...prev, password: e.target.value }))}
                     placeholder={tr("输入SSH密码", "Enter SSH password")}
-                      className="bg-slate-800/50 border-slate-700 text-white pr-10"
+                      className="bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 pr-10"
                   />
                     <button
                       type="button"
                       onClick={() => setShowPassword(!showPassword)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 transition-colors"
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 dark:text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
                       aria-label={showPassword ? tr("隐藏密码", "Hide password") : tr("显示密码", "Show password")}
                     >
                       {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -1874,23 +1917,23 @@ export default function BareMetal() {
                 </div>
               ) : (
                 <div>
-                  <Label className="text-slate-300">{tr("私钥内容", "Private Key Content")}</Label>
+                  <Label className="text-slate-600 dark:text-slate-300">{tr("私钥内容", "Private Key Content")}</Label>
                   <div className="space-y-3 mt-2">
                       <label className="flex-1">
-                        <div className="flex items-center gap-2 bg-slate-800/50 border border-slate-700 rounded-md p-3 cursor-pointer hover:border-blue-500/50 transition-colors">
-                          <Upload className="w-4 h-4 text-cyan-400" />
-                          <span className="text-sm text-slate-300">
+                        <div className="flex items-center gap-2 bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-xl p-3 cursor-pointer hover:border-indigo-300 dark:hover:border-indigo-500/60 transition-colors">
+                          <Upload className="w-4 h-4 text-indigo-500 dark:text-indigo-400" />
+                          <span className="text-sm text-slate-600 dark:text-slate-300">
                             {privateKeyFileName || tr("选择私钥文件", "Select private key file")}
                           </span>
                         </div>
                       <input type="file" accept=".pem,.key,.txt" onChange={handlePrivateKeyUpload} className="hidden" />
                       </label>
-                    <div className="text-xs text-slate-500 text-center">{tr("或", "or")}</div>
+                    <div className="text-xs text-slate-400 dark:text-slate-500 text-center">{tr("或", "or")}</div>
                     <textarea
                       value={sshConfig.privateKey}
                       onChange={(e) => setSshConfig((prev) => ({ ...prev, privateKey: e.target.value }))}
                       placeholder={tr("粘贴私钥内容...", "Paste private key content...")}
-                      className="w-full h-32 bg-slate-800/50 border border-slate-700 text-white rounded-md p-3 text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                      className="w-full h-32 bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 rounded-xl p-3 text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-indigo-300/60"
                     />
                   </div>
                 </div>
@@ -1898,9 +1941,9 @@ export default function BareMetal() {
 
               {sshConfig.username !== "root" && (
                 <div>
-                  <Label className="text-slate-300 flex items-center gap-2">
+                  <Label className="text-slate-600 dark:text-slate-300 flex items-center gap-2">
                     {tr("sudo密码", "sudo Password")}
-                    <span className="text-xs text-slate-500">
+                    <span className="text-xs text-slate-400 dark:text-slate-500">
                       {tr("(留空则默认使用SSH密码或免密sudo)", "(Leave blank to reuse SSH password or sudo-free)")}
                     </span>
                   </Label>
@@ -1910,12 +1953,12 @@ export default function BareMetal() {
                       value={sshConfig.sudoPassword}
                       onChange={(e) => setSshConfig((prev) => ({ ...prev, sudoPassword: e.target.value }))}
                       placeholder={tr("输入sudo密码或留空", "Enter sudo password or leave blank")}
-                      className="bg-slate-800/50 border-slate-700 text-white pr-10"
+                      className="bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 pr-10"
                     />
                     <button
                       type="button"
                       onClick={() => setShowSudoPassword(!showSudoPassword)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 transition-colors"
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 dark:text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
                       aria-label={showSudoPassword ? tr("隐藏密码", "Hide password") : tr("显示密码", "Show password")}
                     >
                       {showSudoPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -1927,7 +1970,7 @@ export default function BareMetal() {
               <Button
                 onClick={handleTestSSH}
                 disabled={!sshConfig.host.trim() || isTestingSSH || isBatchTesting}
-                className="w-full bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500"
+                className="w-full bg-indigo-500 text-white shadow-md shadow-indigo-300/40 dark:shadow-indigo-950/50 hover:bg-indigo-600 hover:-translate-y-0.5 hover:shadow-lg transition-all duration-200"
               >
                 {isTestingSSH || isBatchTesting ? (
                   <>
@@ -1946,33 +1989,33 @@ export default function BareMetal() {
 
               {/* 批量测试结果 */}
               {Object.keys(batchTestResults).length > 0 && (
-                <div className="rounded-lg border border-slate-700 bg-slate-800/30 p-3 space-y-2 max-h-48 overflow-y-auto">
-                  <div className="text-xs text-slate-400 mb-2">
+                <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 p-3 space-y-2 max-h-48 overflow-y-auto">
+                  <div className="text-xs text-slate-500 dark:text-slate-400 mb-2">
                     {tr("批量测试结果", "Batch Test Results")}
                   </div>
                   {Object.entries(batchTestResults).map(([host, result]) => (
                     <div key={host} className="flex items-center justify-between text-sm">
-                      <span className="font-mono text-slate-300">{host}</span>
+                      <span className="font-mono text-slate-600 dark:text-slate-300">{host}</span>
                       <div className="flex items-center gap-2">
                         {result.status === "pending" && (
-                          <Badge className="bg-slate-500/20 text-slate-400 border border-slate-500/40 text-xs">
+                          <Badge className="bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-700 text-xs">
                             {tr("等待", "Pending")}
                           </Badge>
                         )}
                         {result.status === "testing" && (
-                          <Badge className="bg-blue-500/20 text-blue-400 border border-blue-500/40 text-xs">
+                          <Badge className="bg-indigo-50 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-500/40 text-xs">
                             <Loader2 className="w-3 h-3 mr-1 animate-spin" />
                             {tr("测试中", "Testing")}
                           </Badge>
                         )}
                         {result.status === "success" && (
-                          <Badge className="bg-green-500/20 text-green-400 border border-green-500/40 text-xs">
+                          <Badge className="bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/40 text-xs">
                             <CheckCircle2 className="w-3 h-3 mr-1" />
                             {result.details?.gpuModel ? `${result.details.gpuModel} ×${result.details.gpuCount}` : tr("成功", "OK")}
                           </Badge>
                         )}
                         {result.status === "error" && (
-                          <Badge className="bg-red-500/20 text-red-400 border border-red-500/40 text-xs" title={result.error}>
+                          <Badge className="bg-rose-50 dark:bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-500/40 text-xs" title={result.error}>
                             <XCircle className="w-3 h-3 mr-1" />
                             {tr("失败", "Failed")}
                           </Badge>
@@ -1985,7 +2028,7 @@ export default function BareMetal() {
 
               {/* 单节点测试结果 */}
               {sshStatus === "success" && Object.keys(batchTestResults).length === 0 && lastTestDetails && (
-                <div className="space-y-3 rounded-lg border border-green-500/30 bg-green-500/5 p-3 text-sm text-green-200">
+                <div className="space-y-3 rounded-2xl border border-emerald-200 dark:border-emerald-500/40 bg-emerald-50/70 dark:bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-300">
                   <div className="flex items-center gap-2">
                   <CheckCircle2 className="w-4 h-4" />
                     <span>{tr("SSH连接成功", "SSH connection succeeded")}</span>
@@ -1994,7 +2037,7 @@ export default function BareMetal() {
                         {tr("主机名：", "Hostname: ")}
                         {lastTestDetails.hostname || sshConfig.host}
                       </div>
-                      <div className="text-xs text-green-100/70">
+                      <div className="text-xs text-emerald-600/70 dark:text-emerald-400/90">
                         {tr("GPU：", "GPU: ")}
                         {lastTestDetails.gpuModel && lastTestDetails.gpuCount
                           ? `${lastTestDetails.gpuModel} × ${lastTestDetails.gpuCount}`
@@ -2003,7 +2046,7 @@ export default function BareMetal() {
                 </div>
               )}
               {sshStatus === "error" && Object.keys(batchTestResults).length === 0 && (
-                <div className="flex items-center gap-2 text-red-400 text-sm bg-red-500/10 p-3 rounded-lg">
+                <div className="flex items-center gap-2 text-rose-600 dark:text-rose-400 text-sm bg-rose-50 dark:bg-rose-500/10 p-3 rounded-2xl">
                   <XCircle className="w-4 h-4" />
                   <span>{tr("SSH连接失败，请检查配置", "SSH connection failed, please check configuration")}</span>
                 </div>
@@ -2013,7 +2056,7 @@ export default function BareMetal() {
                 variant="outline"
                 onClick={handleAddNode}
                 disabled={sshStatus !== "success"}
-                className="w-full border-blue-500/40 text-blue-300 hover:bg-blue-500/10"
+                className="w-full border-indigo-200 dark:border-indigo-500/40 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-500/10"
               >
                 <Plus className="w-4 h-4 mr-2" />
                 {Object.keys(batchTestResults).length > 0
@@ -2023,59 +2066,70 @@ export default function BareMetal() {
             </div>
           </Card>
 
-          <Card className="bg-slate-900/50 border-blue-500/20 p-6">
-            <div className="flex items-center gap-2 mb-6">
-              <Terminal className="w-5 h-5 text-purple-400" />
-              <h3 className="text-lg font-semibold text-white">{tr("命令检测说明", "Command Check Info")}</h3>
-            </div>
-            <p className="text-sm text-slate-400 mb-4">
-              {tr("检测目标节点上的关键命令和库是否可用", "Check if required commands and libraries exist on target nodes")}
-            </p>
+          <Card className="bg-white dark:bg-slate-900 border-0 shadow-soft p-6 md:p-8 xl:col-span-2">
+            <button
+              type="button"
+              onClick={() => setShowCmdInfo((v) => !v)}
+              className="flex w-full items-center gap-2 text-left"
+              aria-expanded={showCmdInfo}
+            >
+              <Terminal className="w-5 h-5 text-violet-500 dark:text-violet-400" />
+              <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100 flex-1">{tr("命令检测说明", "Command Check Info")}</h3>
+              {showCmdInfo ? <ChevronDown className="w-5 h-5 text-slate-400" /> : <ChevronRight className="w-5 h-5 text-slate-400" />}
+            </button>
+            {showCmdInfo && (
+              <>
+                <p className="text-sm text-slate-500 dark:text-slate-400 mt-4 mb-4">
+                  {tr("检测目标节点上的关键命令和库是否可用", "Check if required commands and libraries exist on target nodes")}
+                </p>
 
-            <div className="space-y-3 mb-4">
-              {CORE_COMMANDS.map((cmd) => (
-                <div
-                  key={cmd.name}
-                  className="flex items-start gap-3 p-3 rounded-lg bg-slate-800/30 border border-slate-700/50"
-                >
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-mono text-white truncate">{cmd.name}</p>
-                    <p className="text-xs text-slate-400 mt-0.5">{cmd.description[language]}</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+                  {CORE_COMMANDS.map((cmd) => (
+                    <div
+                      key={cmd.name}
+                      className="flex items-start gap-3 p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60"
+                    >
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-mono text-slate-700 dark:text-slate-200 truncate">{cmd.name}</p>
+                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{cmd.description[language]}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="p-3 rounded-2xl bg-indigo-50 dark:bg-indigo-500/10 border border-indigo-200 dark:border-indigo-500/40">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-indigo-600 dark:text-indigo-400 mt-0.5 flex-shrink-0" />
+                    <div className="text-xs text-indigo-700 dark:text-indigo-300">
+                      <p className="font-medium mb-1">{tr("NCCL 版本检查", "NCCL Version Check")}</p>
+                      <p className="text-indigo-600/80 dark:text-indigo-400/90">
+                        {tr(
+                          "系统会自动检测 libnccl2、libnccl-dev 包版本是否与 /usr/local/cuda/bin/nvcc 的 CUDA 版本一致",
+                          "The system will automatically check if libnccl2 and libnccl-dev versions match the CUDA version from nvcc"
+                        )}
+                      </p>
+                    </div>
                   </div>
                 </div>
-              ))}
-            </div>
 
-            <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30">
-              <div className="flex items-start gap-2">
-                <AlertCircle className="w-4 h-4 text-blue-400 mt-0.5 flex-shrink-0" />
-                <div className="text-xs text-blue-200">
-                  <p className="font-medium mb-1">{tr("NCCL 版本检查", "NCCL Version Check")}</p>
-                  <p className="text-blue-300/80">
-                    {tr(
-                      "系统会自动检测 libnccl2、libnccl-dev 包版本是否与 /usr/local/cuda/bin/nvcc 的 CUDA 版本一致",
-                      "The system will automatically check if libnccl2 and libnccl-dev versions match the CUDA version from nvcc"
-                    )}
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            <p className="text-xs text-slate-500 mt-4 text-center">
-              {tr("在下方「待检查节点」列表中点击「检测」按钮进行命令检测", "Click the 'Check' button in the 'Pending Nodes' list below to run command detection")}
-              </p>
+                <p className="text-xs text-slate-400 dark:text-slate-500 mt-4 text-center">
+                  {tr("在下方「待检查节点」列表中点击「检测」按钮进行命令检测", "Click the 'Check' button in the 'Pending Nodes' list below to run command detection")}
+                </p>
+              </>
+            )}
           </Card>
         </div>
 
-        <Card className="bg-slate-900/50 border-blue-500/20 p-6 mb-8">
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-8 items-start">
+        <Card className="bg-white dark:bg-slate-900 border-0 shadow-soft p-6 md:p-8">
           <div className="flex items-center gap-2 mb-6">
-            <Server className="w-5 h-5 text-cyan-400" />
-            <h3 className="text-lg font-semibold text-white">{tr("待检查节点", "Pending Nodes")}</h3>
-            <Badge variant="outline" className="ml-2 border-blue-500/40 text-blue-200">
+            <Server className="w-5 h-5 text-indigo-500 dark:text-indigo-400" />
+            <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100">{tr("待检查节点", "Pending Nodes")}</h3>
+            <Badge variant="outline" className="ml-2 border-indigo-200 dark:border-indigo-500/40 text-indigo-700 dark:text-indigo-300">
               {tr("共", "Total")} {selectedNodes.length} {tr("台", "nodes")}
             </Badge>
             {selectedNodeIds.size > 0 && (
-              <Badge variant="outline" className="ml-2 border-orange-500/40 text-orange-200">
+              <Badge variant="outline" className="ml-2 border-orange-200 dark:border-orange-500/40 text-orange-700 dark:text-orange-300">
                 {tr("已选", "Selected")} {selectedNodeIds.size} {tr("台", "nodes")}
               </Badge>
             )}
@@ -2085,7 +2139,7 @@ export default function BareMetal() {
                 size="sm"
                 onClick={handleCheckSelectedNodesCommands}
                 disabled={selectedNodes.length === 0 || selectedNodes.some((n) => n.isCheckingCommands)}
-                className="border-purple-500/40 text-purple-300 hover:bg-purple-500/10"
+                className="border-violet-200 dark:border-violet-500/40 text-violet-600 dark:text-violet-400 hover:bg-violet-50 dark:hover:bg-violet-500/10"
               >
                 <Terminal className="w-4 h-4 mr-1" />
                 {selectedNodeIds.size > 0
@@ -2097,7 +2151,7 @@ export default function BareMetal() {
                   variant="outline"
                   size="sm"
                   onClick={handleRemoveSelectedNodes}
-                  className="border-red-500/40 text-red-300 hover:bg-red-500/10"
+                  className="border-rose-200 dark:border-rose-500/40 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-500/10"
                 >
                   <Trash2 className="w-4 h-4 mr-1" />
                   {tr("移除选中", "Remove selected")} ({selectedNodeIds.size})
@@ -2111,7 +2165,7 @@ export default function BareMetal() {
           </div>
 
           {selectedNodes.length === 0 ? (
-            <div className="text-center py-8 text-slate-400">
+            <div className="text-center py-8 text-slate-500 dark:text-slate-400">
               {tr('暂无节点，请完成SSH测试后点击"加入待检查节点"', 'No nodes yet. Complete the SSH test, then click "Add to pending nodes".')}
             </div>
           ) : (
@@ -2119,7 +2173,7 @@ export default function BareMetal() {
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="border-b border-slate-800 text-slate-300">
+                    <tr className="border-b border-slate-100 dark:border-slate-800 text-slate-600 dark:text-slate-300">
                       <th className="py-3 px-4 text-left w-12">
                         <Checkbox
                           checked={pendingNodesHeaderCheckboxState}
@@ -2130,7 +2184,7 @@ export default function BareMetal() {
                               setSelectedNodeIds(new Set())
                             }
                           }}
-                          className="border-slate-600"
+                          className="border-slate-300 dark:border-slate-600"
                           title={tr("全选/取消全选（所有分页）", "Select / clear all nodes (all pages)")}
                         />
                       </th>
@@ -2144,33 +2198,33 @@ export default function BareMetal() {
                   </thead>
                   <tbody>
                     {paginatedNodes.map((node) => (
-                      <tr key={node.id} className="border-b border-slate-800 hover:bg-slate-800/30">
+                      <tr key={node.id} className="border-b border-slate-100 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800">
                         <td className="py-3 px-4">
                           <Checkbox
                             checked={selectedNodeIds.has(node.id)}
                             onCheckedChange={() => handleToggleNodeSelection(node.id)}
-                            className="border-slate-600"
+                            className="border-slate-300 dark:border-slate-600"
                           />
                         </td>
-                        <td className="py-3 px-4 text-slate-300">
+                        <td className="py-3 px-4 text-slate-600 dark:text-slate-300">
                           {node.port && node.port !== "22" ? `${node.host}:${node.port}` : node.host}
                         </td>
                         <td className="py-3 px-4">
                           {node.internalIp || node.summary?.internalIp ? (
-                            <span className="text-cyan-400 font-mono text-xs">{node.internalIp || node.summary?.internalIp}</span>
+                            <span className="text-indigo-500 dark:text-indigo-400 font-mono text-xs">{node.internalIp || node.summary?.internalIp}</span>
                           ) : (
-                            <span className="text-slate-500 text-xs">{tr("未获取", "N/A")}</span>
+                            <span className="text-slate-400 dark:text-slate-500 text-xs">{tr("未获取", "N/A")}</span>
                           )}
                         </td>
-                        <td className="py-3 px-4 text-slate-300">{node.username}</td>
-                        <td className="py-3 px-4 text-slate-300">
+                        <td className="py-3 px-4 text-slate-600 dark:text-slate-300">{node.username}</td>
+                        <td className="py-3 px-4 text-slate-600 dark:text-slate-300">
                           {node.summary?.gpuModel && node.summary.gpuCount
                             ? `${node.summary.gpuModel} × ${node.summary.gpuCount}`
                             : tr("待检测", "Pending")}
                         </td>
                         <td className="py-3 px-4">
                           {node.isCheckingCommands ? (
-                            <div className="flex items-center gap-2 text-blue-400">
+                            <div className="flex items-center gap-2 text-indigo-600 dark:text-indigo-400">
                               <Loader2 className="w-4 h-4 animate-spin" />
                               <span className="text-xs">{tr("检测中...", "Checking...")}</span>
                             </div>
@@ -2179,11 +2233,11 @@ export default function BareMetal() {
                               {/* 统计信息 */}
                               <div className="flex items-center gap-2 mb-1">
                                 {Object.values(node.commandCheck.commands).every(Boolean) ? (
-                                  <CheckCircle2 className="w-4 h-4 text-green-400 flex-shrink-0" />
+                                  <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 flex-shrink-0" />
                                 ) : (
-                                  <AlertCircle className="w-4 h-4 text-yellow-400 flex-shrink-0" />
+                                  <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 flex-shrink-0" />
                                 )}
-                                <span className="text-xs text-slate-300">
+                                <span className="text-xs text-slate-600 dark:text-slate-300">
                                   {Object.values(node.commandCheck.commands).filter(Boolean).length}/
                                   {Object.keys(node.commandCheck.commands).length} {tr("通过", "passed")}
                                 </span>
@@ -2193,10 +2247,10 @@ export default function BareMetal() {
                                 const failedCmds = Object.entries(node.commandCheck.commands).filter(([, passed]) => !passed)
                                 if (failedCmds.length === 0) return null
                                 return (
-                                  <div className="bg-red-500/10 border border-red-500/30 rounded p-2 mb-1">
-                                    <div className="text-xs text-red-300 font-medium mb-1">{tr("缺失", "Missing")}:</div>
+                                  <div className="bg-rose-50 dark:bg-rose-500/10 border border-rose-200 dark:border-rose-500/40 rounded-xl p-2 mb-1">
+                                    <div className="text-xs text-rose-600 dark:text-rose-400 font-medium mb-1">{tr("缺失", "Missing")}:</div>
                                     {failedCmds.map(([cmd]) => (
-                                      <div key={cmd} className="flex items-center gap-1 text-xs text-red-400">
+                                      <div key={cmd} className="flex items-center gap-1 text-xs text-rose-600 dark:text-rose-400">
                                         <XCircle className="w-3 h-3 flex-shrink-0" />
                                         <span className="font-mono truncate" title={cmd}>
                                           {cmd.split('/').pop()}
@@ -2210,18 +2264,18 @@ export default function BareMetal() {
                               {node.commandCheck.versions && (
                                 <div className="text-xs">
                                   {node.commandCheck.versions.versionMatch ? (
-                                    <span className="text-green-400">
+                                    <span className="text-emerald-600 dark:text-emerald-400">
                                       CUDA {node.commandCheck.versions.nvcc} ✓
                                     </span>
                                   ) : node.commandCheck.versions.nvcc ? (
-                                    <div className="bg-yellow-500/10 border border-yellow-500/30 rounded p-2">
-                                      <div className="text-yellow-300 font-medium mb-1">{tr("版本不一致", "Version mismatch")}:</div>
-                                      <div className="text-yellow-400/80">nvcc: {node.commandCheck.versions.nvcc}</div>
+                                    <div className="bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/40 rounded-xl p-2">
+                                      <div className="text-amber-700 dark:text-amber-300 font-medium mb-1">{tr("版本不一致", "Version mismatch")}:</div>
+                                      <div className="text-amber-600/80 dark:text-amber-400/90">nvcc: {node.commandCheck.versions.nvcc}</div>
                                       {node.commandCheck.versions.libnccl2 && (
-                                        <div className="text-yellow-400/80">libnccl2: {node.commandCheck.versions.libnccl2}</div>
+                                        <div className="text-amber-600/80 dark:text-amber-400/90">libnccl2: {node.commandCheck.versions.libnccl2}</div>
                                       )}
                                       {node.commandCheck.versions.libncclDev && (
-                                        <div className="text-yellow-400/80">libnccl-dev: {node.commandCheck.versions.libncclDev}</div>
+                                        <div className="text-amber-600/80 dark:text-amber-400/90">libnccl-dev: {node.commandCheck.versions.libncclDev}</div>
                                       )}
                                     </div>
                                   ) : null}
@@ -2230,7 +2284,7 @@ export default function BareMetal() {
                               <Button
                                 variant="ghost"
                                 size="sm"
-                                className="text-blue-300 hover:text-blue-200 h-6 px-2 mt-1 justify-start"
+                                className="text-indigo-600 dark:text-indigo-400 hover:text-indigo-500 dark:hover:text-indigo-400 h-6 px-2 mt-1 justify-start"
                                 onClick={() => handleCheckNodeCommands(node.id)}
                               >
                                 <Terminal className="w-3 h-3 mr-1" />
@@ -2241,7 +2295,7 @@ export default function BareMetal() {
                             <Button
                               variant="outline"
                               size="sm"
-                              className="border-purple-500/40 text-purple-300 hover:bg-purple-500/10"
+                              className="border-violet-200 dark:border-violet-500/40 text-violet-600 dark:text-violet-400 hover:bg-violet-50 dark:hover:bg-violet-500/10"
                               onClick={() => handleCheckNodeCommands(node.id)}
                             >
                               <Terminal className="w-4 h-4 mr-1" />
@@ -2253,7 +2307,7 @@ export default function BareMetal() {
                           <Button
                             variant="ghost"
                             size="sm"
-                            className="text-red-300 hover:text-red-200"
+                            className="text-rose-600 dark:text-rose-400 hover:text-rose-500 dark:hover:text-rose-400"
                             onClick={() => handleRemoveNode(node.id)}
                           >
                             <Trash2 className="w-4 h-4 mr-1" />
@@ -2266,8 +2320,8 @@ export default function BareMetal() {
                 </table>
               </div>
               {totalPages > 1 && (
-                <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-800">
-                  <div className="text-sm text-slate-400">
+                <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-100 dark:border-slate-800">
+                  <div className="text-sm text-slate-500 dark:text-slate-400">
                     {tr("显示", "Showing")} {(currentPage - 1) * pageSize + 1} - {Math.min(currentPage * pageSize, selectedNodes.length)}{" "}
                     {tr("条，共", "of")} {selectedNodes.length} {tr("条", "records")}
                   </div>
@@ -2277,11 +2331,11 @@ export default function BareMetal() {
                       size="sm"
                       onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
                       disabled={currentPage === 1}
-                      className="border-slate-600"
+                      className="border-slate-300 dark:border-slate-600"
                     >
                       {tr("上一页", "Previous")}
                     </Button>
-                    <div className="text-sm text-slate-300">
+                    <div className="text-sm text-slate-600 dark:text-slate-300">
                       {tr("第", "Page")} {currentPage} / {totalPages} {tr("页", "")}
                     </div>
                     <Button
@@ -2289,7 +2343,7 @@ export default function BareMetal() {
                       size="sm"
                       onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
                       disabled={currentPage === totalPages}
-                      className="border-slate-600"
+                      className="border-slate-300 dark:border-slate-600"
                     >
                       {tr("下一页", "Next")}
                     </Button>
@@ -2300,22 +2354,22 @@ export default function BareMetal() {
           )}
         </Card>
 
-        <Card className="bg-slate-900/50 border-blue-500/20 p-6 mb-8">
+        <Card className="bg-white dark:bg-slate-900 border-0 shadow-soft p-6 md:p-8">
           <div className="flex items-center gap-2 mb-6">
-            <Play className="w-5 h-5 text-green-400" />
-            <h3 className="text-lg font-semibold text-white">{tr("健康检查", "Health Checks")}</h3>
+            <Play className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
+            <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100">{tr("健康检查", "Health Checks")}</h3>
           </div>
-          <p className="text-sm text-slate-400 mb-6">
+          <p className="text-sm text-slate-500 dark:text-slate-400 mb-6">
             {tr("选择检查项目并开始节点健康检查", "Select test items and start the health inspection")}
           </p>
 
           <div className="mb-6">
-          <Label className="text-slate-300 mb-4 block">{tr("选择检查项目", "Select test items")}</Label>
+          <Label className="text-slate-600 dark:text-slate-300 mb-4 block">{tr("选择检查项目", "Select test items")}</Label>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {CHECK_ITEMS.map((item) => (
                 <label
                   key={item.id}
-                  className="flex items-start gap-3 p-4 rounded-lg bg-slate-800/30 border border-slate-700/50 cursor-pointer hover:border-blue-500/50 transition-colors"
+                  className="flex items-start gap-3 p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60 cursor-pointer hover:border-indigo-300 dark:hover:border-indigo-500/60 transition-colors"
                 >
                   <Checkbox
                     checked={selectedItems.includes(item.id)}
@@ -2329,10 +2383,10 @@ export default function BareMetal() {
                     className="mt-1"
                   />
                   <div className="flex-1">
-                    <p className="text-sm font-medium text-white flex items-center gap-2">
+                    <p className="text-sm font-medium text-slate-700 dark:text-slate-200 flex items-center gap-2">
                       {item.name[language]}
                     </p>
-                    <p className="text-xs text-slate-400 mt-1">{item.description[language]}</p>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{item.description[language]}</p>
                   </div>
                 </label>
               ))}
@@ -2340,11 +2394,11 @@ export default function BareMetal() {
           </div>
 
           <div className="mb-6">
-            <Label className="text-slate-300 mb-3 block">{tr("DCGM诊断级别", "DCGM diagnostic level")}</Label>
+            <Label className="text-slate-600 dark:text-slate-300 mb-3 block">{tr("DCGM诊断级别", "DCGM diagnostic level")}</Label>
             <select
               value={dcgmLevel}
               onChange={(e) => setDcgmLevel(e.target.value)}
-              className="w-full bg-slate-800/50 border border-slate-700 text-white rounded-md px-3 py-2 text-sm"
+              className="w-full bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 rounded-xl px-3 py-2 text-sm"
             >
               <option value="1">{tr("Level 1 - 快速检查 (<1分钟)", "Level 1 - Quick scan (<1 min)")}</option>
               <option value="2">{tr("Level 2 - 标准检查 (~2分钟)", "Level 2 - Standard (~2 min)")}</option>
@@ -2356,7 +2410,7 @@ export default function BareMetal() {
           <Button
             onClick={handleRunTests}
             disabled={!canRunTests}
-            className="w-full bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-500 hover:to-emerald-500 disabled:opacity-50"
+            className="w-full bg-emerald-500 text-white shadow-md shadow-emerald-300/40 dark:shadow-emerald-950/50 hover:bg-emerald-600 hover:-translate-y-0.5 disabled:opacity-50 transition-all duration-200"
             size="lg"
           >
             {isRunningTests || isPollingJob ? (
@@ -2372,12 +2426,27 @@ export default function BareMetal() {
             )}
           </Button>
 
+          {allRunningJobs.filter((j) => j.jobId !== currentJobId).length > 0 && (
+            <div className="mt-6 rounded-2xl border border-amber-100 dark:border-amber-900/40 bg-amber-50/60 dark:bg-amber-900/10 p-4 text-sm">
+              <div className="font-medium text-amber-700 dark:text-amber-300 mb-2">{tr("其他运行中的任务（节点占用中，避免冲突）", "Other running tasks (nodes occupied — avoid conflicts)")}</div>
+              <ul className="space-y-1 text-slate-600 dark:text-slate-300">
+                {allRunningJobs.filter((j) => j.jobId !== currentJobId).map((j) => (
+                  <li key={j.jobId} className="flex items-center gap-2 flex-wrap">
+                    <span className="font-mono text-xs">{j.jobId.slice(0, 8)}</span>
+                    <span className="text-xs text-slate-400">{(j.nodes || []).map((n) => n.host).join(", ")}</span>
+                    <span className="text-xs px-1.5 rounded bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300">{j.status}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           {currentJob && (
-            <div className="mt-6 rounded-lg border border-slate-800 bg-slate-900/60 p-4 text-sm text-slate-300">
+            <div className="mt-6 rounded-2xl border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60 p-4 text-sm text-slate-600 dark:text-slate-300">
               <div className="flex items-center justify-between flex-wrap gap-3">
                 <div>
-                  <p className="text-white font-semibold">{tr("正在执行的任务", "Running task")}</p>
-                  <p className="text-xs text-slate-400">
+                  <p className="text-slate-800 dark:text-slate-100 font-semibold">{tr("正在执行的任务", "Running task")}</p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
                     {tr("任务 ID", "Job ID")}: {currentJob.jobId}
                   </p>
                 </div>
@@ -2388,7 +2457,7 @@ export default function BareMetal() {
                       variant="outline"
                       size="sm"
                       onClick={handleStopJob}
-                      className="border-red-500/40 text-red-300 hover:bg-red-500/10"
+                      className="border-rose-200 dark:border-rose-500/40 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-500/10"
                     >
                       <Square className="w-4 h-4 mr-1" />
                       {tr("停止", "Stop")}
@@ -2404,11 +2473,11 @@ export default function BareMetal() {
                     ? `${node.host}:${node.port}`
                     : node.host
                   return (
-                    <div key={node.nodeId} className="rounded border border-slate-800 p-3 bg-slate-900/50">
+                    <div key={node.nodeId} className="rounded-xl border border-slate-100 dark:border-slate-800 p-3 bg-slate-50 dark:bg-slate-800/60">
                       <div className="flex items-center justify-between">
                         <div>
-                          <p className="text-white font-medium">{hostDisplay}</p>
-                          <p className="text-xs text-slate-500">
+                          <p className="text-slate-700 dark:text-slate-200 font-medium">{hostDisplay}</p>
+                          <p className="text-xs text-slate-400 dark:text-slate-500">
                             <span>GPU: {node.gpuType || tr("未知", "Unknown")}</span>
                           </p>
                         </div>
@@ -2421,16 +2490,17 @@ export default function BareMetal() {
             </div>
           )}
         </Card>
+        </div>
 
-        <Card className="bg-slate-900/50 border-blue-500/20 p-6 mb-8">
+        <Card className="bg-white dark:bg-slate-900 border-0 shadow-soft p-6 md:p-8 mb-8">
           <div className="flex items-center gap-2 mb-6">
-            <ListChecks className="w-5 h-5 text-cyan-400" />
-            <h3 className="text-lg font-semibold text-white">{tr("测试结果", "Test Results")}</h3>
-            <Badge variant="outline" className="ml-2 border-blue-500/40 text-blue-200">
+            <ListChecks className="w-5 h-5 text-indigo-500 dark:text-indigo-400" />
+            <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100">{tr("测试结果", "Test Results")}</h3>
+            <Badge variant="outline" className="ml-2 border-indigo-200 dark:border-indigo-500/40 text-indigo-700 dark:text-indigo-300">
               {testResults.length} {tr("条", "records")}
             </Badge>
             {selectedResultIds.size > 0 && (
-              <Badge variant="outline" className="ml-2 border-orange-500/40 text-orange-200">
+              <Badge variant="outline" className="ml-2 border-orange-200 dark:border-orange-500/40 text-orange-700 dark:text-orange-300">
                 {tr("已选", "Selected")} {selectedResultIds.size} {tr("条", "records")}
               </Badge>
             )}
@@ -2440,7 +2510,7 @@ export default function BareMetal() {
                   variant="outline"
                   size="sm"
                   onClick={handleExportSelectedResults}
-                  className="border-blue-500/40 text-blue-300 hover:bg-blue-500/10"
+                  className="border-indigo-200 dark:border-indigo-500/40 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-500/10"
                   disabled={isExportingLogs}
                 >
                   {isExportingLogs ? (
@@ -2468,7 +2538,7 @@ export default function BareMetal() {
                       description: `${tr("共删除", "Removed")} ${count} ${tr("条结果", "records")}`,
                     })
                   }}
-                  className="border-red-500/40 text-red-300 hover:bg-red-500/10"
+                  className="border-rose-200 dark:border-rose-500/40 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-500/10"
                 >
                   <Trash2 className="w-4 h-4 mr-1" />
                   {tr("删除选中", "Delete selected")} ({selectedResultIds.size})
@@ -2491,7 +2561,7 @@ export default function BareMetal() {
           </div>
 
           {testResults.length === 0 ? (
-            <div className="text-center py-8 text-slate-400">
+            <div className="text-center py-8 text-slate-500 dark:text-slate-400">
               {tr("暂无测试结果，请配置SSH并运行健康检查", "No test results yet. Configure SSH and run a health check.")}
             </div>
           ) : (
@@ -2499,7 +2569,7 @@ export default function BareMetal() {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-slate-700">
+                <tr className="border-b border-slate-200 dark:border-slate-700">
                       <th className="text-left py-3 px-4 w-12">
                         <Checkbox
                           checked={resultsHeaderCheckboxState}
@@ -2510,29 +2580,29 @@ export default function BareMetal() {
                               setSelectedResultIds(new Set())
                             }
                           }}
-                          className="border-slate-600"
+                          className="border-slate-300 dark:border-slate-600"
                           title={tr("全选/取消全选（所有分页）", "Select / clear all rows (all pages)")}
                         />
                       </th>
-                      <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("节点地址", "Node Address")}</th>
-                  <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("GPU类型", "GPU Type")}</th>
-                  <th className="text-left py-3 px-4 text-slate-300 font-medium">
+                      <th className="text-left py-3 px-4 text-slate-600 dark:text-slate-300 font-medium">{tr("节点地址", "Node Address")}</th>
+                  <th className="text-left py-3 px-4 text-slate-600 dark:text-slate-300 font-medium">{tr("GPU类型", "GPU Type")}</th>
+                  <th className="text-left py-3 px-4 text-slate-600 dark:text-slate-300 font-medium">
                     <div>nvBandwidthTest</div>
-                    <div className="text-[10px] font-normal text-slate-500 mt-0.5">
+                    <div className="text-[10px] font-normal text-slate-400 dark:text-slate-500 mt-0.5">
                       {tr("PCIe H2D/D2H · GPU D2D", "PCIe H2D/D2H · GPU D2D")}
                     </div>
                   </th>
-                  <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("NCCL测试", "NCCL Test")}</th>
-                  <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("DCGM诊断", "DCGM Diagnostics")}</th>
-                  <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("IB检查", "IB Check")}</th>
-                      <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("状态", "Status")}</th>
-                  <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("执行日志", "Execution Log")}</th>
-                  <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("完成时间", "Completed At")}</th>
+                  <th className="text-left py-3 px-4 text-slate-600 dark:text-slate-300 font-medium">{tr("NCCL测试", "NCCL Test")}</th>
+                  <th className="text-left py-3 px-4 text-slate-600 dark:text-slate-300 font-medium">{tr("DCGM诊断", "DCGM Diagnostics")}</th>
+                  <th className="text-left py-3 px-4 text-slate-600 dark:text-slate-300 font-medium">{tr("IB检查", "IB Check")}</th>
+                      <th className="text-left py-3 px-4 text-slate-600 dark:text-slate-300 font-medium">{tr("状态", "Status")}</th>
+                  <th className="text-left py-3 px-4 text-slate-600 dark:text-slate-300 font-medium">{tr("执行日志", "Execution Log")}</th>
+                  <th className="text-left py-3 px-4 text-slate-600 dark:text-slate-300 font-medium">{tr("完成时间", "Completed At")}</th>
                 </tr>
               </thead>
               <tbody>
                     {paginatedResults.map((result) => (
-                      <tr key={result.id} className="border-b border-slate-800 hover:bg-slate-800/30">
+                      <tr key={result.id} className="border-b border-slate-100 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800">
                       <td className="py-3 px-4">
                           <Checkbox
                             checked={selectedResultIds.has(result.id)}
@@ -2547,11 +2617,11 @@ export default function BareMetal() {
                                 return next
                               })
                             }}
-                            className="border-slate-600"
+                            className="border-slate-300 dark:border-slate-600"
                           />
                       </td>
-                        <td className="py-3 px-4 text-white font-medium">{result.hostname || result.host}</td>
-                        <td className="py-3 px-4 text-white">{result.gpuType || "Unknown"}</td>
+                        <td className="py-3 px-4 text-slate-700 dark:text-slate-200 font-medium">{result.hostname || result.host}</td>
+                        <td className="py-3 px-4 text-slate-700 dark:text-slate-200">{result.gpuType || "Unknown"}</td>
                         <td className="py-3 px-4">{renderNvbandwidthMetric(result.nvbandwidth, "GB/s", language)}</td>
                         <td className="py-3 px-4">{renderMetric(result.nccl, "GB/s", language)}</td>
                       <td className="py-3 px-4">
@@ -2578,7 +2648,7 @@ export default function BareMetal() {
                                         return next
                                       })
                                     }}
-                                    className="text-slate-400 hover:text-white"
+                                    className="text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
                                     title={tr("展开/收起 阶段详情", "Expand/Collapse phase details")}
                                   >
                                     {expandedIbRows.has(result.id) ? (
@@ -2590,7 +2660,7 @@ export default function BareMetal() {
                                 )}
                               </div>
                               {result.ib.phases && Object.values(result.ib.phases).some((p) => !p.passed) && (
-                                <div className="text-xs text-red-300 max-w-[200px]">
+                                <div className="text-xs text-rose-600 dark:text-rose-400 max-w-[200px]">
                                   {Object.values(result.ib.phases)
                                     .filter((p) => !p.passed)
                                     .map((p) => p.name)
@@ -2598,14 +2668,14 @@ export default function BareMetal() {
                                 </div>
                               )}
                               {result.ib.phases && expandedIbRows.has(result.id) && (
-                                <div className="mt-1 p-2 bg-slate-800/50 rounded text-xs max-w-[300px]">
+                                <div className="mt-1 p-2 bg-slate-50 dark:bg-slate-800/60 rounded-xl text-xs max-w-[300px]">
                                   {Object.values(result.ib.phases).map((phase) => (
                                     <div key={phase.name} className="mb-1">
-                                      <span className={phase.passed ? "text-green-400" : "text-red-400"}>
+                                      <span className={phase.passed ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}>
                                         {phase.passed ? "✅" : "❌"} {phase.name}
                                       </span>
                                       {!phase.passed && phase.issues.length > 0 && (
-                                        <ul className="ml-4 mt-0.5 text-red-300 list-disc list-inside">
+                                        <ul className="ml-4 mt-0.5 text-rose-600 dark:text-rose-400 list-disc list-inside">
                                           {phase.issues.map((issue, idx) => (
                                             <li key={idx}>{issue}</li>
                                           ))}
@@ -2625,7 +2695,7 @@ export default function BareMetal() {
                         <Button
                           size="sm"
                           variant="outline"
-                          className="border-blue-500/30 text-blue-400 bg-transparent hover:bg-blue-500/10"
+                          className="border-indigo-200 dark:border-indigo-500/40 text-indigo-600 dark:text-indigo-400 bg-transparent hover:bg-indigo-50 dark:hover:bg-indigo-500/10"
                             disabled={!result.executionLog}
                             onClick={() =>
                               setLogViewer({
@@ -2641,15 +2711,15 @@ export default function BareMetal() {
                           <Button
                             size="sm"
                             variant="outline"
-                            className="ml-2 border-blue-500/30 text-blue-400 bg-transparent hover:bg-blue-500/10"
+                            className="ml-2 border-indigo-200 dark:border-indigo-500/40 text-indigo-600 dark:text-indigo-400 bg-transparent hover:bg-indigo-50 dark:hover:bg-indigo-500/10"
                             disabled={!result.executionLog}
                             onClick={() => handleExportResult(result)}
                           >
                             {tr("导出", "Export")}
                         </Button>
                       </td>
-                        <td className="py-3 px-4 text-slate-300 text-xs whitespace-nowrap">
-                          {result.completedAt ? new Date(result.completedAt).toLocaleString("zh-CN") : "--"}
+                        <td className="py-3 px-4 text-slate-600 dark:text-slate-300 text-xs whitespace-nowrap">
+                          {result.completedAt ? new Date(result.completedAt).toLocaleString(language === "zh" ? "zh-CN" : "en-US") : "--"}
                     </td>
                   </tr>
                     ))}
@@ -2657,8 +2727,8 @@ export default function BareMetal() {
             </table>
           </div>
               {resultsTotalPages > 1 && (
-                <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-800">
-                  <div className="text-sm text-slate-400">
+                <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-100 dark:border-slate-800">
+                  <div className="text-sm text-slate-500 dark:text-slate-400">
                     {tr("显示", "Showing")} {(resultsPage - 1) * resultsPageSize + 1} -{" "}
                     {Math.min(resultsPage * resultsPageSize, testResults.length)} {tr("条，共", "of")} {testResults.length}{" "}
                     {tr("条", "records")}
@@ -2669,11 +2739,11 @@ export default function BareMetal() {
                       size="sm"
                       onClick={() => setResultsPage((p) => Math.max(1, p - 1))}
                       disabled={resultsPage === 1}
-                      className="border-slate-600"
+                      className="border-slate-300 dark:border-slate-600"
                     >
                       {tr("上一页", "Previous")}
                     </Button>
-                    <div className="text-sm text-slate-300">
+                    <div className="text-sm text-slate-600 dark:text-slate-300">
                       {tr("第", "Page")} {resultsPage} / {resultsTotalPages} {tr("页", "")}
                     </div>
                     <Button
@@ -2681,7 +2751,7 @@ export default function BareMetal() {
                       size="sm"
                       onClick={() => setResultsPage((p) => Math.min(resultsTotalPages, p + 1))}
                       disabled={resultsPage === resultsTotalPages}
-                      className="border-slate-600"
+                      className="border-slate-300 dark:border-slate-600"
                     >
                       {tr("下一页", "Next")}
                     </Button>
@@ -2693,15 +2763,15 @@ export default function BareMetal() {
         </Card>
 
         {/* 多机NCCL测试 */}
-        <Card className="bg-slate-900/50 border-purple-500/20 p-6 mb-8">
+        <Card className="bg-white dark:bg-slate-900 border-0 shadow-soft p-6 md:p-8 mb-8">
           <div className="flex items-center gap-2 mb-6">
-            <Server className="w-5 h-5 text-purple-400" />
-            <h3 className="text-lg font-semibold text-white">{tr("多机NCCL测试", "Multi-Node NCCL Test")}</h3>
-            <Badge variant="outline" className="ml-2 border-purple-500/40 text-purple-200">
+            <Server className="w-5 h-5 text-violet-500 dark:text-violet-400" />
+            <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100">{tr("多机NCCL测试", "Multi-Node NCCL Test")}</h3>
+            <Badge variant="outline" className="ml-2 border-violet-200 dark:border-violet-500/40 text-violet-700 dark:text-violet-300">
               mpirun
             </Badge>
           </div>
-          <p className="text-sm text-slate-400 mb-6">
+          <p className="text-sm text-slate-500 dark:text-slate-400 mb-6">
             {tr("使用mpirun在多个节点上运行NCCL all_reduce_perf测试（在第一个节点执行mpirun命令）", "Run NCCL all_reduce_perf test across multiple nodes using mpirun (executed on the first node)")}
           </p>
 
@@ -2709,25 +2779,25 @@ export default function BareMetal() {
             {/* 左侧：节点配置 */}
             <div className="space-y-4">
               <div>
-                <Label className="text-slate-300 mb-2 block">{tr("节点列表", "Node List")}</Label>
-                <p className="text-xs text-slate-500 mb-2">
+                <Label className="text-slate-600 dark:text-slate-300 mb-2 block">{tr("节点列表", "Node List")}</Label>
+                <p className="text-xs text-slate-400 dark:text-slate-500 mb-2">
                   {tr("可以勾选待检测节点，或在下方输入主机列表", "Select pending nodes or enter host list below")}
                 </p>
-                <div className="bg-slate-800/30 rounded-lg border border-slate-700/50 p-3">
+                <div className="bg-slate-50 dark:bg-slate-800/60 rounded-2xl border border-slate-200/60 dark:border-slate-700/60 p-3">
                   {selectedNodeIds.size > 0 ? (
                     <div className="flex flex-wrap gap-2">
                       {selectedNodes.filter(n => selectedNodeIds.has(n.id)).map(n => {
                         const internalIp = n.internalIp || n.summary?.internalIp
                         return (
-                          <Badge key={n.id} className="bg-purple-500/20 text-purple-300 border border-purple-500/40" title={`公网: ${n.host}`}>
+                          <Badge key={n.id} className="bg-violet-50 dark:bg-violet-500/10 text-violet-600 dark:text-violet-400 border border-violet-200 dark:border-violet-500/40" title={`${tr("公网", "Public")}: ${n.host}`}>
                             {internalIp || n.host}
-                            {internalIp && <span className="ml-1 text-purple-400/60 text-xs">(内网)</span>}
+                            {internalIp && <span className="ml-1 text-violet-500/60 dark:text-violet-400/90 text-xs">({tr("内网", "internal")})</span>}
                           </Badge>
                         )
                       })}
                     </div>
                   ) : (
-                    <p className="text-xs text-slate-500">
+                    <p className="text-xs text-slate-400 dark:text-slate-500">
                       {tr("未选择节点，将使用下方主机列表或所有待检测节点（优先使用内网IP）", "No nodes selected, will use host list below or all pending nodes (prefers internal IP)")}
                     </p>
                   )}
@@ -2735,15 +2805,15 @@ export default function BareMetal() {
               </div>
 
               <div>
-                <Label className="text-slate-300 mb-2 block">
+                <Label className="text-slate-600 dark:text-slate-300 mb-2 block">
                   {tr("主机列表", "Host List")}
-                  <span className="text-xs text-slate-500 ml-2">{tr("(可选，每行一个IP)", "(optional, one IP per line)")}</span>
+                  <span className="text-xs text-slate-400 dark:text-slate-500 ml-2">{tr("(可选，每行一个IP)", "(optional, one IP per line)")}</span>
                 </Label>
                 <textarea
                   value={hostfileContent}
                   onChange={(e) => setHostfileContent(e.target.value)}
                   placeholder={tr("172.31.10.7\n172.31.10.9\n...", "172.31.10.7\n172.31.10.9\n...")}
-                  className="w-full h-20 bg-slate-800/50 border border-slate-700 text-white rounded-md p-3 text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-purple-500/50"
+                  className="w-full h-20 bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 rounded-xl p-3 text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-violet-300/60"
                 />
               </div>
 
@@ -2753,7 +2823,7 @@ export default function BareMetal() {
                   variant="outline"
                   onClick={handleSetupSshTrust}
                   disabled={isSettingUpSshTrust || selectedNodes.length < 2}
-                  className="w-full border-orange-500/40 text-orange-300 hover:bg-orange-500/10"
+                  className="w-full border-orange-200 dark:border-orange-500/40 text-orange-600 dark:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-500/10"
                 >
                   {isSettingUpSshTrust ? (
                     <>
@@ -2767,25 +2837,25 @@ export default function BareMetal() {
                     </>
                   )}
                 </Button>
-                <p className="text-xs text-slate-500 mt-1">
+                <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
                   {tr("mpirun需要节点间SSH免密，点击自动配置", "mpirun requires SSH trust between nodes, click to auto-configure")}
                 </p>
               </div>
 
               {/* SSH免密配置结果 */}
               {showSshTrustResults && (
-                <div className="mt-2 rounded-lg border border-slate-700 bg-slate-800/30 p-3 space-y-2 max-h-40 overflow-y-auto">
+                <div className="mt-2 rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 p-3 space-y-2 max-h-40 overflow-y-auto">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs text-slate-400">{tr("配置结果", "Setup Results")}</span>
+                    <span className="text-xs text-slate-500 dark:text-slate-400">{tr("配置结果", "Setup Results")}</span>
                     <button
                       onClick={() => setShowSshTrustResults(false)}
-                      className="text-xs text-slate-500 hover:text-slate-300"
+                      className="text-xs text-slate-400 dark:text-slate-500 hover:text-slate-400 dark:hover:text-slate-500"
                     >
                       ✕
                     </button>
                   </div>
                   {isSettingUpSshTrust ? (
-                    <div className="flex items-center gap-2 text-xs text-slate-400">
+                    <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
                       <Loader2 className="w-3 h-3 animate-spin" />
                       {tr("正在配置SSH免密互信...", "Configuring SSH trust...")}
                     </div>
@@ -2794,33 +2864,33 @@ export default function BareMetal() {
                       <div key={idx} className="space-y-1">
                         <div className="flex items-center justify-between text-xs gap-2">
                           <div className="flex flex-col">
-                            <span className="font-mono text-slate-300">{result.host}</span>
+                            <span className="font-mono text-slate-600 dark:text-slate-300">{result.host}</span>
                             {(result as any).internalIp && (
-                              <span className="font-mono text-slate-500 text-[10px]">内网: {(result as any).internalIp}</span>
+                              <span className="font-mono text-slate-400 dark:text-slate-500 text-[10px]">{tr("内网", "Internal")}: {(result as any).internalIp}</span>
                             )}
                           </div>
                           {result.status === "success" ? (
-                            <Badge className="bg-green-500/20 text-green-400 border border-green-500/40 text-xs shrink-0">
+                            <Badge className="bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/40 text-xs shrink-0">
                               <CheckCircle2 className="w-3 h-3 mr-1" />
                               {tr("成功", "OK")}
                             </Badge>
                           ) : result.status === "warning" ? (
-                            <Badge className="bg-yellow-500/20 text-yellow-400 border border-yellow-500/40 text-xs shrink-0">
+                            <Badge className="bg-amber-50 dark:bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-500/40 text-xs shrink-0">
                               <AlertTriangle className="w-3 h-3 mr-1" />
                               {tr("警告", "Warning")}
                             </Badge>
                           ) : (
-                            <Badge className="bg-red-500/20 text-red-400 border border-red-500/40 text-xs shrink-0">
+                            <Badge className="bg-rose-50 dark:bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-500/40 text-xs shrink-0">
                               <XCircle className="w-3 h-3 mr-1" />
                               {tr("失败", "Failed")}
                             </Badge>
                           )}
                         </div>
                         {(result.status === "warning" || result.status === "error") && result.message && (
-                          <div className={`text-[10px] font-mono pl-1 border-l-2 ${
+                          <div className={`text-[10px] font-mono px-2 py-1 rounded-xl ${
                             result.status === "warning" 
-                              ? "text-yellow-400/80 border-yellow-500/40" 
-                              : "text-red-400/80 border-red-500/40"
+                              ? "text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-500/10" 
+                              : "text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-500/10"
                           }`}>
                             {result.message}
                           </div>
@@ -2828,7 +2898,7 @@ export default function BareMetal() {
                       </div>
                     ))
                   ) : (
-                    <div className="text-xs text-slate-500">{tr("无结果", "No results")}</div>
+                    <div className="text-xs text-slate-400 dark:text-slate-500">{tr("无结果", "No results")}</div>
                   )}
                 </div>
               )}
@@ -2836,123 +2906,123 @@ export default function BareMetal() {
 
             {/* 右侧：MPI参数 */}
             <div className="space-y-3">
-              <Label className="text-slate-300 block">{tr("MPI参数配置", "MPI Parameters")}</Label>
+              <Label className="text-slate-600 dark:text-slate-300 block">{tr("MPI参数配置", "MPI Parameters")}</Label>
               
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <Label className="text-xs text-slate-400">btl_tcp_if / oob_tcp_if</Label>
+                  <Label className="text-xs text-slate-500 dark:text-slate-400">btl_tcp_if / oob_tcp_if</Label>
                   <Input
                     value={multiNodeConfig.btlTcpIf}
                     onChange={(e) => setMultiNodeConfig(prev => ({ ...prev, btlTcpIf: e.target.value }))}
                     placeholder="bond0"
-                    className="bg-slate-800/50 border-slate-700 text-white text-sm h-8"
+                    className="bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-sm h-8"
                   />
                 </div>
                 <div>
-                  <Label className="text-xs text-slate-400">NCCL_SOCKET_IFNAME</Label>
+                  <Label className="text-xs text-slate-500 dark:text-slate-400">NCCL_SOCKET_IFNAME</Label>
                   <Input
                     value={multiNodeConfig.ncclSocketIfname}
                     onChange={(e) => setMultiNodeConfig(prev => ({ ...prev, ncclSocketIfname: e.target.value }))}
                     placeholder="bond0"
-                    className="bg-slate-800/50 border-slate-700 text-white text-sm h-8"
+                    className="bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-sm h-8"
                   />
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <Label className="text-xs text-slate-400">NCCL_IB_HCA</Label>
+                  <Label className="text-xs text-slate-500 dark:text-slate-400">NCCL_IB_HCA</Label>
                   <Input
                     value={multiNodeConfig.ncclIbHca}
                     onChange={(e) => setMultiNodeConfig(prev => ({ ...prev, ncclIbHca: e.target.value }))}
                     placeholder="ib7s400p0,ib7s400p1,..."
-                    className="bg-slate-800/50 border-slate-700 text-white text-sm h-8"
+                    className="bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-sm h-8"
                   />
                 </div>
                 <div>
-                  <Label className="text-xs text-slate-400">UCX_NET_DEVICES</Label>
+                  <Label className="text-xs text-slate-500 dark:text-slate-400">UCX_NET_DEVICES</Label>
                   <Input
                     value={multiNodeConfig.ucxNetDevices}
                     onChange={(e) => setMultiNodeConfig(prev => ({ ...prev, ucxNetDevices: e.target.value }))}
                     placeholder="ib7s400p0:1,ib7s400p1:1,..."
-                    className="bg-slate-800/50 border-slate-700 text-white text-sm h-8"
+                    className="bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-sm h-8"
                   />
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <Label className="text-xs text-slate-400">NCCL_CROSS_NIC</Label>
+                  <Label className="text-xs text-slate-500 dark:text-slate-400">NCCL_CROSS_NIC</Label>
                   <Input
                     value={multiNodeConfig.ncclCrossNic}
                     onChange={(e) => setMultiNodeConfig(prev => ({ ...prev, ncclCrossNic: e.target.value }))}
                     placeholder="1"
-                    className="bg-slate-800/50 border-slate-700 text-white text-sm h-8"
+                    className="bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-sm h-8"
                   />
                 </div>
                 <div>
-                  <Label className="text-xs text-slate-400">UCX_TLS</Label>
+                  <Label className="text-xs text-slate-500 dark:text-slate-400">UCX_TLS</Label>
                   <Input
                     value={multiNodeConfig.ucxTls}
                     onChange={(e) => setMultiNodeConfig(prev => ({ ...prev, ucxTls: e.target.value }))}
                     placeholder="rc,sm,cuda_copy,self"
-                    className="bg-slate-800/50 border-slate-700 text-white text-sm h-8"
+                    className="bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-sm h-8"
                   />
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <Label className="text-xs text-slate-400">IB_QPS</Label>
+                  <Label className="text-xs text-slate-500 dark:text-slate-400">IB_QPS</Label>
                   <Input
                     value={multiNodeConfig.ncclIbQps}
                     onChange={(e) => setMultiNodeConfig(prev => ({ ...prev, ncclIbQps: e.target.value }))}
                     placeholder="8"
-                    className="bg-slate-800/50 border-slate-700 text-white text-sm h-8"
+                    className="bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-sm h-8"
                   />
                 </div>
                 <div>
-                  <Label className="text-xs text-slate-400">GPU/Node</Label>
+                  <Label className="text-xs text-slate-500 dark:text-slate-400">GPU/Node</Label>
                   <Input
                     value={multiNodeConfig.gpuPerNode}
                     onChange={(e) => setMultiNodeConfig(prev => ({ ...prev, gpuPerNode: e.target.value }))}
                     placeholder="8"
-                    className="bg-slate-800/50 border-slate-700 text-white text-sm h-8"
+                    className="bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-sm h-8"
                   />
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <Label className="text-xs text-slate-400">NCCL_DEBUG</Label>
+                  <Label className="text-xs text-slate-500 dark:text-slate-400">NCCL_DEBUG</Label>
                   <Input
                     value={multiNodeConfig.ncclDebug}
                     onChange={(e) => setMultiNodeConfig(prev => ({ ...prev, ncclDebug: e.target.value }))}
                     placeholder="SUBSYS"
-                    className="bg-slate-800/50 border-slate-700 text-white text-sm h-8"
+                    className="bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-sm h-8"
                   />
                 </div>
                 <div>
-                  <Label className="text-xs text-slate-400">
+                  <Label className="text-xs text-slate-500 dark:text-slate-400">
                     {tr("all_reduce_perf 路径", "all_reduce_perf path")}
                   </Label>
                   <Input
                     value={multiNodeConfig.allReducePerfPath}
                     onChange={(e) => setMultiNodeConfig(prev => ({ ...prev, allReducePerfPath: e.target.value }))}
                     placeholder="/tmp/ghx/nccl-tests/build/all_reduce_perf"
-                    className="bg-slate-800/50 border-slate-700 text-white text-sm h-8"
+                    className="bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-sm h-8"
                   />
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <Label className="text-xs text-slate-400">{tr("额外参数", "Extra Parameters")}</Label>
+                  <Label className="text-xs text-slate-500 dark:text-slate-400">{tr("额外参数", "Extra Parameters")}</Label>
                   <Input
                     value={multiNodeConfig.extra}
                     onChange={(e) => setMultiNodeConfig(prev => ({ ...prev, extra: e.target.value }))}
                     placeholder=""
-                    className="bg-slate-800/50 border-slate-700 text-white text-sm h-8"
+                    className="bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-sm h-8"
                   />
                 </div>
                 <div className="flex items-end pb-1">
@@ -2961,7 +3031,7 @@ export default function BareMetal() {
                       checked={multiNodeConfig.sharpEnabled}
                       onCheckedChange={(checked) => setMultiNodeConfig(prev => ({ ...prev, sharpEnabled: !!checked }))}
                     />
-                    <span className="text-xs text-slate-400">
+                    <span className="text-xs text-slate-500 dark:text-slate-400">
                       {tr("启用 SHARP（SHARP_COLL / COLLNET）", "Enable SHARP (SHARP_COLL / COLLNET)")}
                     </span>
                   </label>
@@ -2974,7 +3044,7 @@ export default function BareMetal() {
             <Button
               onClick={handleRunMultiNodeTest}
               disabled={isRunningMultiNode || selectedNodes.length === 0}
-              className="flex-1 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 disabled:opacity-50"
+              className="flex-1 bg-violet-500 text-white shadow-md shadow-violet-300/40 dark:shadow-violet-950/50 hover:bg-violet-600 hover:-translate-y-0.5 disabled:opacity-50 transition-all duration-200"
               size="lg"
             >
               {isRunningMultiNode ? (
@@ -3005,24 +3075,24 @@ export default function BareMetal() {
 
         {/* 多机测试执行结果区域 */}
         {(isRunningMultiNode || multiNodeResult) && (
-          <Card className="bg-slate-900/50 border-purple-500/20 p-6 mb-8">
+          <Card className="bg-white dark:bg-slate-900 border-0 shadow-soft p-6 md:p-8 mb-8">
             <div className="flex items-center gap-2 mb-4 flex-wrap">
-              <Terminal className="w-5 h-5 text-purple-400" />
-              <h3 className="text-lg font-semibold text-white">{tr("多机测试执行结果", "Multi-Node Test Results")}</h3>
+              <Terminal className="w-5 h-5 text-violet-500 dark:text-violet-400" />
+              <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100">{tr("多机测试执行结果", "Multi-Node Test Results")}</h3>
               {isRunningMultiNode && (
-                <Badge className="bg-blue-500/20 text-blue-400 border border-blue-500/40 ml-2">
+                <Badge className="bg-indigo-50 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-500/40 ml-2">
                   <Loader2 className="w-3 h-3 mr-1 animate-spin" />
                   {tr("执行中", "Running")}
                 </Badge>
               )}
               {multiNodeResult && !isRunningMultiNode && (
                 multiNodeResult.passed === true ? (
-                  <Badge className="bg-green-500/20 text-green-400 border border-green-500/40 ml-2">
+                  <Badge className="bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/40 ml-2">
                     <CheckCircle2 className="w-3 h-3 mr-1" />
                     {tr("通过", "Passed")}
                   </Badge>
                 ) : (
-                  <Badge className="bg-red-500/20 text-red-400 border border-red-500/40 ml-2">
+                  <Badge className="bg-rose-50 dark:bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-500/40 ml-2">
                     <XCircle className="w-3 h-3 mr-1" />
                     {tr("失败", "Failed")}
                   </Badge>
@@ -3034,7 +3104,7 @@ export default function BareMetal() {
                     type="button"
                     variant="outline"
                     size="sm"
-                    className="border-purple-500/40 text-purple-200 hover:bg-purple-500/10 h-8"
+                    className="border-violet-200 dark:border-violet-500/40 text-violet-700 dark:text-violet-300 hover:bg-violet-50 dark:hover:bg-violet-500/10 h-8"
                     onClick={copyMultiNodeFullReport}
                   >
                     <Copy className="w-3.5 h-3.5 mr-1" />
@@ -3042,7 +3112,7 @@ export default function BareMetal() {
                   </Button>
                 )}
                 {multiNodeResult?.bandwidth != null && !Number.isNaN(multiNodeResult.bandwidth) && (
-                  <span className="text-2xl font-bold text-cyan-400 tabular-nums">
+                  <span className="text-2xl font-bold text-indigo-500 dark:text-indigo-400 tabular-nums">
                     {multiNodeResult.bandwidth.toFixed(2)} GB/s
                   </span>
                 )}
@@ -3050,7 +3120,7 @@ export default function BareMetal() {
             </div>
 
             {multiNodeResult?.error && (
-              <div className="mb-4 rounded-md border border-red-500/40 bg-red-950/35 p-3 text-sm text-red-100 whitespace-pre-wrap break-words font-mono leading-relaxed">
+              <div className="mb-4 rounded-xl border border-rose-200 dark:border-rose-500/40 bg-rose-50 dark:bg-rose-500/10 p-3 text-sm text-rose-700 dark:text-rose-300 whitespace-pre-wrap break-words font-mono leading-relaxed">
                 {multiNodeResult.error}
               </div>
             )}
@@ -3058,27 +3128,27 @@ export default function BareMetal() {
             {multiNodeResult && (
               <>
                 <div className="grid grid-cols-3 gap-4 mb-4 text-sm">
-                  <div className="bg-slate-800/30 rounded p-3">
-                    <p className="text-slate-400 text-xs">{tr("节点数量", "Node Count")}</p>
-                    <p className="text-white font-semibold">{multiNodeResult.nodeCount ?? "—"}</p>
+                  <div className="bg-slate-50 dark:bg-slate-800/60 rounded-xl p-3">
+                    <p className="text-slate-500 dark:text-slate-400 text-xs">{tr("节点数量", "Node Count")}</p>
+                    <p className="text-slate-800 dark:text-slate-100 font-semibold">{multiNodeResult.nodeCount ?? "—"}</p>
                   </div>
-                  <div className="bg-slate-800/30 rounded p-3">
-                    <p className="text-slate-400 text-xs">{tr("退出码", "Exit Code")}</p>
+                  <div className="bg-slate-50 dark:bg-slate-800/60 rounded-xl p-3">
+                    <p className="text-slate-500 dark:text-slate-400 text-xs">{tr("退出码", "Exit Code")}</p>
                     <p
                       className={
                         multiNodeResult.exitCode === 0
-                          ? "text-green-400 font-semibold"
+                          ? "text-emerald-600 dark:text-emerald-400 font-semibold"
                           : multiNodeResult.exitCode != null
-                            ? "text-red-400 font-semibold"
-                            : "text-slate-400 font-semibold"
+                            ? "text-rose-600 dark:text-rose-400 font-semibold"
+                            : "text-slate-500 dark:text-slate-400 font-semibold"
                       }
                     >
                       {multiNodeResult.exitCode ?? "—"}
                     </p>
                   </div>
-                  <div className="bg-slate-800/30 rounded p-3">
-                    <p className="text-slate-400 text-xs">{tr("测试带宽", "Bandwidth")}</p>
-                    <p className="text-cyan-400 font-semibold">
+                  <div className="bg-slate-50 dark:bg-slate-800/60 rounded-xl p-3">
+                    <p className="text-slate-500 dark:text-slate-400 text-xs">{tr("测试带宽", "Bandwidth")}</p>
+                    <p className="text-indigo-500 dark:text-indigo-400 font-semibold">
                       {multiNodeResult.bandwidth != null && !Number.isNaN(multiNodeResult.bandwidth)
                         ? `${multiNodeResult.bandwidth.toFixed(2)} GB/s`
                         : "—"}
@@ -3089,7 +3159,7 @@ export default function BareMetal() {
                 <div className="space-y-4">
                   <div>
                     <div className="flex items-center justify-between mb-2">
-                      <Label className="text-xs text-slate-400">{tr("执行命令", "Command")}</Label>
+                      <Label className="text-xs text-slate-500 dark:text-slate-400">{tr("执行命令", "Command")}</Label>
                       <Button
                         variant="ghost"
                         size="sm"
@@ -3097,19 +3167,19 @@ export default function BareMetal() {
                           navigator.clipboard.writeText(multiNodeResult.command || '')
                           toast({ title: tr("已复制命令", "Command copied") })
                         }}
-                        className="text-xs text-blue-400 hover:text-blue-300 h-6"
+                        className="text-xs text-indigo-600 dark:text-indigo-400 hover:text-indigo-600 dark:hover:text-indigo-400 h-6"
                       >
                         {tr("复制", "Copy")}
                       </Button>
                     </div>
-                    <pre className="bg-slate-950/50 rounded p-3 text-xs text-green-400 font-mono overflow-x-auto whitespace-pre-wrap border border-slate-800">
+                    <pre className="bg-slate-100 dark:bg-slate-800 rounded-xl p-3 text-xs text-emerald-600 dark:text-emerald-400 font-mono overflow-x-auto whitespace-pre-wrap border border-slate-100 dark:border-slate-800">
                       {multiNodeResult.command}
                     </pre>
                   </div>
 
                   <div>
                     <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
-                      <Label className="text-xs text-slate-400">{tr("执行日志", "Execution Log")}</Label>
+                      <Label className="text-xs text-slate-500 dark:text-slate-400">{tr("执行日志", "Execution Log")}</Label>
                       <div className="flex items-center gap-1">
                         <Button
                           variant="ghost"
@@ -3127,7 +3197,7 @@ export default function BareMetal() {
                               toast({ title: tr("复制失败", "Copy failed"), variant: "destructive" })
                             }
                           }}
-                          className="text-xs text-slate-300 hover:text-white h-6"
+                          className="text-xs text-slate-600 dark:text-slate-300 hover:text-slate-700 dark:hover:text-slate-200 h-6"
                         >
                           <Copy className="w-3 h-3 mr-1" />
                           {tr("复制日志", "Copy log")}
@@ -3140,14 +3210,14 @@ export default function BareMetal() {
                             content: multiNodeResult.stdout || "",
                             title: tr("多机NCCL测试日志", "Multi-Node NCCL Test Log"),
                           })}
-                          className="text-xs text-blue-400 hover:text-blue-300 h-6"
+                          className="text-xs text-indigo-600 dark:text-indigo-400 hover:text-indigo-600 dark:hover:text-indigo-400 h-6"
                         >
                           <FileText className="w-3 h-3 mr-1" />
                           {tr("全屏查看", "Full Screen")}
                         </Button>
                       </div>
                     </div>
-                    <pre className="bg-slate-950/50 rounded p-3 text-xs text-slate-300 font-mono max-h-80 overflow-y-auto border border-slate-800">
+                    <pre className="bg-slate-100 dark:bg-slate-800 rounded-xl p-3 text-xs text-slate-600 dark:text-slate-300 font-mono max-h-80 overflow-y-auto border border-slate-100 dark:border-slate-800">
                       {multiNodeResult.stdout || tr("等待输出...", "Waiting for output...")}
                     </pre>
                   </div>
@@ -3155,7 +3225,7 @@ export default function BareMetal() {
                   {multiNodeResult.stderr && (
                     <div>
                       <div className="flex items-center justify-between mb-2">
-                        <Label className="text-xs text-red-400">{tr("错误输出", "Error Output")}</Label>
+                        <Label className="text-xs text-rose-600 dark:text-rose-400">{tr("错误输出", "Error Output")}</Label>
                         <Button
                           variant="ghost"
                           size="sm"
@@ -3167,13 +3237,13 @@ export default function BareMetal() {
                               toast({ title: tr("复制失败", "Copy failed"), variant: "destructive" })
                             }
                           }}
-                          className="text-xs text-red-300 hover:text-red-100 h-6"
+                          className="text-xs text-rose-600 dark:text-rose-400 hover:text-rose-500 dark:hover:text-rose-400 h-6"
                         >
                           <Copy className="w-3 h-3 mr-1" />
                           {tr("复制", "Copy")}
                         </Button>
                       </div>
-                      <pre className="bg-red-950/30 rounded p-3 text-xs text-red-300 font-mono max-h-40 overflow-y-auto border border-red-800/50">
+                      <pre className="bg-rose-50 dark:bg-rose-500/10 rounded-xl p-3 text-xs text-rose-600 dark:text-rose-400 font-mono max-h-40 overflow-y-auto border border-rose-200 dark:border-rose-500/40">
                         {multiNodeResult.stderr}
                       </pre>
                     </div>
@@ -3183,7 +3253,7 @@ export default function BareMetal() {
             )}
 
             {isRunningMultiNode && !multiNodeResult && (
-              <div className="flex items-center justify-center py-12 text-slate-400">
+              <div className="flex items-center justify-center py-12 text-slate-500 dark:text-slate-400">
                 <Loader2 className="w-6 h-6 mr-3 animate-spin" />
                 {tr("正在执行多机NCCL测试，请稍候...", "Running multi-node NCCL test, please wait...")}
               </div>
@@ -3191,32 +3261,32 @@ export default function BareMetal() {
           </Card>
         )}
 
-        <Card className="bg-slate-900/50 border-blue-500/20 p-6 mb-8">
+        <Card className="bg-white dark:bg-slate-900 border-0 shadow-soft p-6 md:p-8 mb-8">
           <div className="flex items-center gap-2 mb-4">
-            <Monitor className="w-5 h-5 text-cyan-400" />
-            <h3 className="text-lg font-semibold text-white">{tr("GPU性能基准值", "GPU Benchmark Reference")}</h3>
+            <Monitor className="w-5 h-5 text-indigo-500 dark:text-indigo-400" />
+            <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100">{tr("GPU性能基准值", "GPU Benchmark Reference")}</h3>
           </div>
-          <p className="text-sm text-slate-400 mb-6">
+          <p className="text-sm text-slate-500 dark:text-slate-400 mb-6">
             {tr("各GPU型号的性能基准值对照表", "Benchmark reference for different GPU models")}
           </p>
 
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-slate-700">
-                  <th className="text-left py-3 px-4 text-slate-300 font-medium">{tr("GPU型号", "GPU Model")}</th>
-                  <th className="text-left py-3 px-4 text-slate-300 font-medium">D2D (GB/s)</th>
-                  <th className="text-left py-3 px-4 text-slate-300 font-medium">NCCL (GB/s)</th>
-                  <th className="text-left py-3 px-4 text-slate-300 font-medium">H2D/D2H (GB/s)</th>
+                <tr className="border-b border-slate-200 dark:border-slate-700">
+                  <th className="text-left py-3 px-4 text-slate-600 dark:text-slate-300 font-medium">{tr("GPU型号", "GPU Model")}</th>
+                  <th className="text-left py-3 px-4 text-slate-600 dark:text-slate-300 font-medium">D2D (GB/s)</th>
+                  <th className="text-left py-3 px-4 text-slate-600 dark:text-slate-300 font-medium">NCCL (GB/s)</th>
+                  <th className="text-left py-3 px-4 text-slate-600 dark:text-slate-300 font-medium">H2D/D2H (GB/s)</th>
                 </tr>
               </thead>
               <tbody>
                 {benchmarkEntries.map(([model, values]) => (
-                  <tr key={model} className="border-b border-slate-800">
-                    <td className="py-3 px-4 text-white font-medium">{model}</td>
-                    <td className="py-3 px-4 text-slate-300">{values.d2d}</td>
-                    <td className="py-3 px-4 text-slate-300">{values.nccl}</td>
-                    <td className="py-3 px-4 text-slate-300">{values.h2d_d2h}</td>
+                  <tr key={model} className="border-b border-slate-100 dark:border-slate-800">
+                    <td className="py-3 px-4 text-slate-700 dark:text-slate-200 font-medium">{model}</td>
+                    <td className="py-3 px-4 text-slate-600 dark:text-slate-300">{values.d2d}</td>
+                    <td className="py-3 px-4 text-slate-600 dark:text-slate-300">{values.nccl}</td>
+                    <td className="py-3 px-4 text-slate-600 dark:text-slate-300">{values.h2d_d2h}</td>
                   </tr>
                 ))}
               </tbody>
@@ -3224,17 +3294,17 @@ export default function BareMetal() {
           </div>
         </Card>
 
-        <Card className="bg-slate-900/50 border-blue-500/20 p-6">
+        <Card className="bg-white dark:bg-slate-900 border-0 shadow-soft p-6 md:p-8">
           <div className="flex items-center gap-2 mb-4">
-            <FileText className="w-5 h-5 text-purple-400" />
-            <h3 className="text-lg font-semibold text-white">{tr("检查项目说明", "Test Item Descriptions")}</h3>
+            <FileText className="w-5 h-5 text-violet-500 dark:text-violet-400" />
+            <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100">{tr("检查项目说明", "Test Item Descriptions")}</h3>
           </div>
 
           <div className="space-y-4">
             {CHECK_ITEMS.map((item) => (
-              <div key={item.id} className="border-l-2 border-blue-500/50 pl-4">
-                <p className="text-sm font-semibold text-white mb-1">{item.name[language]}</p>
-                <p className="text-xs text-slate-400">{item.description[language]}</p>
+              <div key={item.id} className="rounded-2xl bg-slate-50 dark:bg-slate-800/60 p-4">
+                <p className="text-sm font-semibold text-slate-800 dark:text-slate-100 mb-1">{item.name[language]}</p>
+                <p className="text-xs text-slate-500 dark:text-slate-400">{item.description[language]}</p>
               </div>
             ))}
           </div>
@@ -3242,11 +3312,11 @@ export default function BareMetal() {
       </main>
 
       <Dialog open={logViewer.open} onOpenChange={(open) => setLogViewer((prev) => ({ ...prev, open }))}>
-        <DialogContent className="max-w-3xl bg-slate-950 text-white border border-slate-800">
+        <DialogContent className="max-w-3xl bg-white dark:bg-slate-900 rounded-3xl shadow-xl shadow-slate-200/60 dark:shadow-black/30">
           <DialogHeader>
             <DialogTitle>{logViewer.title}</DialogTitle>
           </DialogHeader>
-          <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap text-xs bg-slate-900/70 rounded-md p-4 border border-slate-800 text-slate-200">
+          <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap text-xs bg-slate-50 dark:bg-slate-800/60 rounded-xl p-4 border border-slate-100 dark:border-slate-800 text-slate-600 dark:text-slate-300">
             {logViewer.content || tr("暂无日志", "No logs")}
           </pre>
         </DialogContent>

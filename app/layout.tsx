@@ -1,17 +1,22 @@
 import type React from "react"
-import type { Metadata } from "next"
-import { GeistSans } from "geist/font/sans"
-import { GeistMono } from "geist/font/mono"
+import type { Metadata, Viewport } from "next"
+import { ThemeProvider } from "@/components/theme-provider"
+import ghxLogoUrl from "@/components/ghx-logo.png"
 import "./globals.css"
 
 export const metadata: Metadata = {
   title: "GHealthX - GPU Health eXpert",
-  description: "GPU集群健康监控与诊断系统",
-  generator: "v0.dev",
+  description: "GPU cluster health monitoring and diagnostics for bare-metal NVIDIA nodes",
   icons: {
-    icon: [{ url: "/logo.ico", sizes: "any" }],
-    apple: [{ url: "/logo.png", sizes: "180x180", type: "image/png" }],
+    icon: [{ url: ghxLogoUrl, sizes: "32x32", type: "image/png" }],
+    apple: [{ url: ghxLogoUrl, sizes: "180x180", type: "image/png" }],
   },
+}
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  themeColor: "#f5f7fb",
 }
 
 export default function RootLayout({
@@ -20,11 +25,17 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="en" className={`${GeistSans.variable} ${GeistMono.variable}`}>
-      <head>
-        <script src="/env.js" async={false}></script>
-      </head>
-      <body className={GeistSans.className}>{children}</body>
+    <html lang="en" suppressHydrationWarning>
+      <body>
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="system"
+          enableSystem
+          disableTransitionOnChange
+        >
+          {children}
+        </ThemeProvider>
+      </body>
     </html>
   )
 }

@@ -1,27 +1,27 @@
 # syntax=docker/dockerfile:1
-# Frontend：geist 本地字体，构建期不访问 Google Fonts。
-# EAI_AGAIN / getaddrinfo：多为构建容器 DNS 不稳定。本文件在安装依赖的「同一条 RUN」里重写 resolv.conf（每步 RUN 新容器会重新注入 DNS，必须在执行 pnpm 的同一层内生效）。
-# 仍失败时可：docker compose build --build-arg NPM_REGISTRY=https://mirrors.cloud.tencent.com/npm/
-# 或 Docker Desktop → Settings → Docker Engine → "dns": ["223.5.5.5","114.114.114.114"]
+# Frontend：系统字体栈，构建期不访问 Google Fonts。
+# EAI_AGAIN / getaddrinfo：多为构建容器 DNS 不稳定。可用 --build-arg BUILD_DNS1=223.5.5.5 --build-arg BUILD_DNS2=114.114.114.114
+# 在「安装依赖的同一条 RUN」里重写 resolv.conf（每步 RUN 新容器会重新注入 DNS，必须在执行 pnpm 的同一层内生效）。
+# 中国大陆可换镜像：docker compose build --build-arg NPM_REGISTRY=https://registry.npmmirror.com
 # 建议启用 BuildKit：set DOCKER_BUILDKIT=1（Windows PowerShell: $env:DOCKER_BUILDKIT=1）
-FROM node:18-alpine AS base
+# 基础镜像锁定已修复 Node 安全公告(2026-10-21)的版本：22.x 需 >=22.23.4（Brotli RCE / TLS 绕过）
+FROM node:22.23.4-alpine AS base
 
 FROM base AS deps
-ARG NPM_REGISTRY=https://registry.npmmirror.com
-ARG BUILD_DNS1=223.5.5.5
-ARG BUILD_DNS2=223.6.6.6
+ARG NPM_REGISTRY=https://registry.npmjs.org
+ARG BUILD_DNS1=
+ARG BUILD_DNS2=
 ENV NPM_CONFIG_REGISTRY=${NPM_REGISTRY} \
     NODE_OPTIONS=--dns-result-order=ipv4first
 
 WORKDIR /app
 COPY package.json pnpm-lock.yaml* ./
 
-# apk 与 pnpm 须在同一条 RUN 内先写 resolv.conf，否则本层仍走 Docker 默认 DNS，易卡在 dl-cdn.alpinelinux.org
-# “temporary error” 一般是网络/DNS，拉长 npm 超时无解，需先保证能解析 apk 源
-RUN printf '%s\n' \
+# 仅在显式传入 BUILD_DNS1 时重写 resolv.conf；默认走 Docker 自身 DNS
+RUN if [ -n "${BUILD_DNS1}" ]; then printf '%s\n' \
       "nameserver ${BUILD_DNS1}" \
       "nameserver ${BUILD_DNS2}" \
-      > /etc/resolv.conf \
+      > /etc/resolv.conf; fi \
     && apk add --no-cache libc6-compat ca-certificates \
     && npm config set registry "${NPM_REGISTRY}" \
     && npm config set fetch-retries 20 \
@@ -33,21 +33,20 @@ RUN printf '%s\n' \
     && pnpm config set fetch-retry-mintimeout 20000 \
     && pnpm config set fetch-retry-maxtimeout 180000 \
     && pnpm config set network-concurrency 2 \
-    && pnpm install --no-frozen-lockfile \
-    && pnpm add jszip@^3.10.1
+    && pnpm install --no-frozen-lockfile
 
 FROM base AS builder
-ARG NPM_REGISTRY=https://registry.npmmirror.com
-ARG BUILD_DNS1=223.5.5.5
-ARG BUILD_DNS2=223.6.6.6
+ARG NPM_REGISTRY=https://registry.npmjs.org
+ARG BUILD_DNS1=
+ARG BUILD_DNS2=
 ENV NPM_CONFIG_REGISTRY=${NPM_REGISTRY} \
     NODE_OPTIONS=--dns-result-order=ipv4first
 
 WORKDIR /app
-RUN printf '%s\n' \
+RUN if [ -n "${BUILD_DNS1}" ]; then printf '%s\n' \
       "nameserver ${BUILD_DNS1}" \
       "nameserver ${BUILD_DNS2}" \
-      > /etc/resolv.conf \
+      > /etc/resolv.conf; fi \
     && npm config set registry "${NPM_REGISTRY}" \
     && npm config set fetch-retries 20 \
     && npm install -g pnpm@9 \
@@ -68,10 +67,10 @@ COPY config ./config
 
 ENV NEXT_TELEMETRY_DISABLED=1
 
-RUN printf '%s\n' \
+RUN if [ -n "${BUILD_DNS1}" ]; then printf '%s\n' \
       "nameserver ${BUILD_DNS1}" \
       "nameserver ${BUILD_DNS2}" \
-      > /etc/resolv.conf \
+      > /etc/resolv.conf; fi \
     && pnpm run build
 
 FROM base AS runner
@@ -83,7 +82,9 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN addgroup --system --gid 1001 nodejs \
     && adduser --system --uid 1001 nextjs
 
-COPY --from=builder /app/public ./public
+# public 必须 --chown：构建上下文可能来自 Windows 传输（root:root 0770），
+# 而运行用户是 nextjs(uid 1001)——不授权则 /logo.png、/icon.svg 取不到。
+COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 
 RUN mkdir .next && chown nextjs:nodejs .next
 

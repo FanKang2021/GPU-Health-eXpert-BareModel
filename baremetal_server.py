@@ -50,6 +50,9 @@ for name, path in ASSETS.items():
     if not path.exists():
         logging.warning("Asset %s not found at %s", name, path)
 
+# 单个健康检查任务内的节点并发上限（ThreadPoolExecutor max_workers），可用 GHX_MAX_CONCURRENCY 调节
+MAX_CONCURRENCY = max(1, int(os.getenv("GHX_MAX_CONCURRENCY", "32")))
+
 FALLBACK_GPU_BENCHMARKS = {
     # 对齐 test.py 的基准值：d2d / h2d_d2h / nccl
     "RTX 3090": {"d2d": 18, "nccl": 7, "h2d_d2h": 20},
@@ -360,14 +363,11 @@ class SSHSession:
             if rel_root != Path('.'):
                 self.run(f"mkdir -p {remote_root}")
             
-            # 上传文件
+            # 上传文件（统一走 self.upload，自动处理目录与执行权限）
             for file in files:
                 local_file = Path(root) / file
                 remote_file = f"{remote_root}/{file}"
-                self.sftp.put(str(local_file), remote_file)
-                # 如果是可执行文件，设置执行权限
-                if os.access(local_file, os.X_OK):
-                    self.run(f"chmod +x {remote_file}", require_root=self.need_sudo)
+                self.upload(local_file, remote_file, executable=os.access(local_file, os.X_OK))
 
 
 # -----------------------------------------------------------------------------
@@ -730,6 +730,10 @@ class RemoteNodeRunner:
         }
 
     def _query_gpu_info(self) -> Dict[str, Any]:
+        # GHX 仅支持 NVIDIA GPU：先探测 nvidia-smi，缺失（非 NVIDIA/驱动未装）直接拒绝并给出明确提示
+        has_nv = self.session.run("command -v nvidia-smi >/dev/null 2>&1 && echo YES || echo NO")
+        if has_nv.stdout.strip() != "YES":
+            raise RuntimeError("非 NVIDIA GPU 或 nvidia-smi 缺失：GHX 仅支持 NVIDIA GPU 节点")
         gpu_cmd = self.session.run("nvidia-smi -L || true")
         gpu_lines = [line.strip() for line in gpu_cmd.stdout.splitlines() if line.strip()]
         primary_gpu = gpu_lines[0] if gpu_lines else "Unknown"
@@ -1081,6 +1085,28 @@ jobs: Dict[str, Dict[str, Any]] = {}
 jobs_lock = threading.Lock()
 
 
+def running_conflict(hosts) -> str:
+    """返回占用给定节点的运行中/待运行任务描述，无冲突返回空串。"""
+    want = {h for h in (hosts or []) if h}
+    if not want:
+        return ""
+    with jobs_lock:
+        for jid, j in jobs.items():
+            if j.get("status") not in ("running", "pending"):
+                continue
+            inter = want & {n.get("host", "") for n in j.get("nodes", [])}
+            if inter:
+                return f"{','.join(sorted(inter))} 正被检查任务 {jid[:8]} 占用"
+    with multi_node_tests_lock:
+        for tid, t in multi_node_tests.items():
+            if t.get("status") != "running":
+                continue
+            inter = want & set(t.get("hosts") or [])
+            if inter:
+                return f"{','.join(sorted(inter))} 正被多机测试 {tid[:8]} 占用"
+    return ""
+
+
 def sanitize_job(job: Dict[str, Any]) -> Dict[str, Any]:
     # 创建副本，移除不能序列化的对象
     job_copy = {}
@@ -1150,8 +1176,8 @@ def run_job(job_id: str):
         dcgm_level = job["dcgmLevel"]
 
     # 并发执行所有节点的检查
-    # 使用线程池，最大并发数等于节点数量（或限制为合理值，如10）
-    max_workers = min(len(nodes), 10)
+    # 使用线程池，最大并发数等于节点数量（上限由 GHX_MAX_CONCURRENCY 控制，默认 32）
+    max_workers = min(len(nodes), MAX_CONCURRENCY)
     try:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # 提交所有节点的检查任务
@@ -1564,6 +1590,10 @@ def api_create_job():
                 },
             }
             job["nodes"].append(node_entry)
+
+        _conf = running_conflict([n.get("host", "") for n in nodes_payload])
+        if _conf:
+            return json_response(False, message=f"节点冲突：{_conf}，请等待其完成或选择其他节点", status=409)
 
         with jobs_lock:
             jobs[job_id] = job
@@ -2288,10 +2318,14 @@ def api_multi_node_nccl():
         
         if not connection:
             raise ValueError("缺少主节点SSH连接信息")
-        
+
+        _mconf = running_conflict(payload.get("hosts") or [])
+        if _mconf:
+            return json_response(False, message=f"节点冲突：{_mconf}，请等待其完成或选择其他节点", status=409)
+
         # 创建测试任务ID
         test_id = str(uuid.uuid4())
-        
+
         # 创建测试任务记录
         with multi_node_tests_lock:
             multi_node_tests[test_id] = {
@@ -2299,6 +2333,7 @@ def api_multi_node_nccl():
                 "status": "pending",
                 "createdAt": utc_now(),
                 "payload": payload,
+                "hosts": payload.get("hosts") or [],
             }
         
         # 在后台线程中执行
@@ -2392,5 +2427,7 @@ def api_stop_job(job_id: str):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    # 本地直跑（python baremetal_server.py）：开启 threaded 以并发处理请求，避免开发服务器串行；
+    # 容器内生产由 gunicorn 接管（见 Dockerfile.ghx-backend CMD），此处仅作本地兜底。
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False, threaded=True)
 

@@ -2,12 +2,18 @@ version: "3.9"
 
 services:
   backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.ghx-backend
     image: ghx-baremetal-backend
     container_name: ghx-backend
     environment:
       - PORT=5000
       - GHX_ASSET_DIR=/app/assets
       - GPU_BENCHMARK_FILE=/app/config/gpu-benchmarks.json
+      # 并发调节：GHX_THREADS = gunicorn HTTP 并发线程数；GHX_MAX_CONCURRENCY = 单任务节点并发上限
+      - GHX_THREADS=${GHX_THREADS:-32}
+      - GHX_MAX_CONCURRENCY=${GHX_MAX_CONCURRENCY:-100}
     volumes:
       # 挂载资产文件（可选，如果镜像中已包含则无需挂载）
       - ./nvbandwidth:/app/nvbandwidth:ro
@@ -22,21 +28,22 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.ghx-dashboard
-      args:
-        NPM_REGISTRY: https://registry.npmmirror.com
-        # 构建仍解析失败时可换腾讯云： https://mirrors.cloud.tencent.com/npm/
-        BUILD_DNS1: "223.5.5.5"
-        BUILD_DNS2: "114.114.114.114"
-        BUILD_DNS3: "119.29.29.29"
+      # 中国大陆网络可取消注释加速构建：
+      # args:
+      #   NPM_REGISTRY: https://registry.npmmirror.com
+      #   BUILD_DNS1: "223.5.5.5"
+      #   BUILD_DNS2: "114.114.114.114"
     image: ghx-frontend
     container_name: ghx-frontend
     environment:
-      # 通过反向代理 (HAProxy/Nginx) 访问时，将前端的 API 请求统一指向 /api
-      # 示例：HAProxy 将 https://domain/api -> http://backend:5000
-      - NEXT_PUBLIC_GHX_API=/api
+      # 抬高 Node HTTP 服务器请求头上限（默认 16KB）：反向代理可能转发较大 cookie，
+      # 避免 Next 服务端对大 cookie 请求返回 431（与 gunicorn --limit-request-field-size 配套）
+      - NODE_OPTIONS=--max-http-header-size=65536
+      # 前端 /api/* 由 next.config.mjs rewrites 转发到 backend:5000（docker 网络内服务名）；
+      # 如后端不在同一 compose 网络，可用 GHX_BACKEND_ORIGIN 覆盖，如 http://192.168.1.10:5000
+      # - GHX_BACKEND_ORIGIN=http://backend:5000
     ports:
       - "3000:3000"
     depends_on:
       - backend
     restart: unless-stopped
-
